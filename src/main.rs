@@ -17,7 +17,7 @@ use crate::nadk::time::get_current_time_seconds;
 const SCALE_X: i32 = 320 / grid::GRID_WIDTH;
 const SCALE_Y: i32 = 240 / grid::GRID_HEIGHT;
 
-const POWER_MULT: f32 = 0.025;
+const POWER_MULT: f32 = 0.05;
 
 const FLUID_COLORS: [Color565; 10] = [
     Color565::from_rgb888(0,   255, 255), // Electric Cyan
@@ -64,7 +64,7 @@ fn main() {
         im.scan();
         let dt = 0.1;
 
-        if im.is_just_released(Key::Ok) {
+        if im.is_just_released(Key::Back) {
             break;
         }
         if im.is_just_pressed(Key::Backspace) {
@@ -87,7 +87,7 @@ fn main() {
         if im.is_just_pressed(Key::Nine)  { current_color_idx = 9; }
 
         // Add density in the center
-        if im.is_keydown(Key::Back) || get_current_time_seconds() < 0.5 || constant_flow {
+        if im.is_keydown(Key::Ok) || get_current_time_seconds() < 0.5 || constant_flow {
             let curr_color = FLUID_COLORS[current_color_idx]
                 .get_components();
 

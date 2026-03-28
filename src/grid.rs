@@ -1,13 +1,12 @@
 use crate::nadk::display::Color565;
 
-// Possible values: 320x240, 160x120, 80x60, 64x48
-pub const GRID_WIDTH:  i32 = 80;
-pub const GRID_HEIGHT: i32 = 60;
+// Possible values: 320x240, 160x120, 80x60, 64x48, 40x30
+pub const GRID_WIDTH:  i32 = 40;
+pub const GRID_HEIGHT: i32 = 30;
 pub const GRID_WIDTH_WITH_BOUNDARY:  usize = GRID_WIDTH  as usize + 2;
 pub const GRID_HEIGHT_WITH_BOUNDARY: usize = GRID_HEIGHT as usize + 2;
 pub const GRID_WITH_BOUNDARY_SIZE:   usize = GRID_WIDTH_WITH_BOUNDARY
                                            * GRID_HEIGHT_WITH_BOUNDARY;
-
 
 pub const CIRCLE_CX: f32       = GRID_WIDTH as f32 / 2.0;
 pub const CIRCLE_CY: f32       = GRID_HEIGHT as f32 / 2.0;
@@ -19,6 +18,12 @@ pub const CIRCLE_MAX_DENS: f32 = 0.05;
 
 const SIM_STEPS: usize = 10;
 const DYE_DECAY: f32 = 0.999;
+
+const DIFF_ITER: usize = 4;   // iterations for both diffuse solves
+const DYE_DIFF: f32    = 0.0001;
+const VEL_VISC: f32    = 0.0001; // near-zero for low viscosity
+
+const AVG_MASK: u32 = !(1 << 9 | 1 << 19 | 1 << 29); // 0xDFEFFBFF
 
 // Maximum representable velocity magnitude.
 // smaller = more precision.
@@ -135,15 +140,132 @@ impl Grid {
         // corners — integer average per packed channel
         // safe because channels are in [0, 1023] so sum fits in u32
         let avg = |a: u32, b: u32| -> u32 {
-            let r = (((a & 0x3FF)        + (b & 0x3FF))        / 2) & 0x3FF;
-            let g = ((((a >> 10) & 0x3FF) + ((b >> 10) & 0x3FF)) / 2) & 0x3FF;
-            let bv= ((((a >> 20) & 0x3FF) + ((b >> 20) & 0x3FF)) / 2) & 0x3FF;
-            r | (g << 10) | (bv << 20)
+            ((a >> 1) & AVG_MASK) + ((b >> 1) & AVG_MASK)
         };
         field[idx(0,    0   )] = avg(field[idx(1,  0   )], field[idx(0,  1  )]);
         field[idx(gw+1, 0   )] = avg(field[idx(gw, 0   )], field[idx(gw, 1  )]);
         field[idx(0,    gh+1)] = avg(field[idx(1,  gh+1)], field[idx(0,  gh )]);
         field[idx(gw+1, gh+1)] = avg(field[idx(gw, gh+1)], field[idx(gw, gh )]);
+    }
+
+    // ------------------------------------------------------------------ //
+    //  diffuse                                                           //
+    // ------------------------------------------------------------------ //
+
+    fn diffuse_rgb(rgb: &mut [u32; GRID_WITH_BOUNDARY_SIZE], dt: f32) {
+        let gw = GRID_WIDTH  as usize;
+        let gh = GRID_HEIGHT as usize;
+        let a   = dt * DYE_DIFF * (GRID_WIDTH as f32).max(GRID_HEIGHT as f32);
+        let inv = 1.0 / (1.0 + 4.0 * a);
+
+        // decode
+        let mut rf = [0.0f32; GRID_WITH_BOUNDARY_SIZE];
+        let mut gf = [0.0f32; GRID_WITH_BOUNDARY_SIZE];
+        let mut bf = [0.0f32; GRID_WITH_BOUNDARY_SIZE];
+        // keep a snapshot of the original values as the "prev" source
+        let mut rf0 = [0.0f32; GRID_WITH_BOUNDARY_SIZE];
+        let mut gf0 = [0.0f32; GRID_WITH_BOUNDARY_SIZE];
+        let mut bf0 = [0.0f32; GRID_WITH_BOUNDARY_SIZE];
+        for i in 0..GRID_WITH_BOUNDARY_SIZE {
+            let r = dec_r(rgb[i]);
+            let g = dec_g(rgb[i]);
+            let b = dec_b(rgb[i]);
+            rf[i] = r; rf0[i] = r;
+            gf[i] = g; gf0[i] = g;
+            bf[i] = b; bf0[i] = b;
+        }
+
+        for _ in 0..DIFF_ITER {
+            for y in 1..=gh {
+                for x in 1..=gw {
+                    let i   = idx(x, y);
+                    let i_l = idx(x-1, y); let i_r = idx(x+1, y);
+                    let i_u = idx(x, y-1); let i_d = idx(x, y+1);
+                    rf[i] = (rf0[i] + a * (rf[i_l] + rf[i_r] + rf[i_u] + rf[i_d])) * inv;
+                    gf[i] = (gf0[i] + a * (gf[i_l] + gf[i_r] + gf[i_u] + gf[i_d])) * inv;
+                    bf[i] = (bf0[i] + a * (bf[i_l] + bf[i_r] + bf[i_u] + bf[i_d])) * inv;
+                }
+            }
+            // boundary on f32 scratch directly
+            for y in 1..=gh {
+                rf[idx(0,    y)] = rf[idx(1,  y)];
+                gf[idx(0,    y)] = gf[idx(1,  y)];
+                bf[idx(0,    y)] = bf[idx(1,  y)];
+                rf[idx(gw+1, y)] = rf[idx(gw, y)];
+                gf[idx(gw+1, y)] = gf[idx(gw, y)];
+                bf[idx(gw+1, y)] = bf[idx(gw, y)];
+            }
+            for x in 1..=gw {
+                rf[idx(x, 0)]    = rf[idx(x, 1)];
+                gf[idx(x, 0)]    = gf[idx(x, 1)];
+                bf[idx(x, 0)]    = bf[idx(x, 1)];
+                rf[idx(x, gh+1)] = rf[idx(x, gh)];
+                gf[idx(x, gh+1)] = gf[idx(x, gh)];
+                bf[idx(x, gh+1)] = bf[idx(x, gh)];
+            }
+            rf[idx(0,    0)]    = 0.5 * (rf[idx(1,  0)]    + rf[idx(0,  1)]);
+            gf[idx(0,    0)]    = 0.5 * (gf[idx(1,  0)]    + gf[idx(0,  1)]);
+            bf[idx(0,    0)]    = 0.5 * (bf[idx(1,  0)]    + bf[idx(0,  1)]);
+            rf[idx(gw+1, 0)]    = 0.5 * (rf[idx(gw, 0)]    + rf[idx(gw, 1)]);
+            gf[idx(gw+1, 0)]    = 0.5 * (gf[idx(gw, 0)]    + gf[idx(gw, 1)]);
+            bf[idx(gw+1, 0)]    = 0.5 * (bf[idx(gw, 0)]    + bf[idx(gw, 1)]);
+            rf[idx(0,    gh+1)] = 0.5 * (rf[idx(1,  gh+1)] + rf[idx(0,  gh)]);
+            gf[idx(0,    gh+1)] = 0.5 * (gf[idx(1,  gh+1)] + gf[idx(0,  gh)]);
+            bf[idx(0,    gh+1)] = 0.5 * (bf[idx(1,  gh+1)] + bf[idx(0,  gh)]);
+            rf[idx(gw+1, gh+1)] = 0.5 * (rf[idx(gw, gh+1)] + rf[idx(gw, gh)]);
+            gf[idx(gw+1, gh+1)] = 0.5 * (gf[idx(gw, gh+1)] + gf[idx(gw, gh)]);
+            bf[idx(gw+1, gh+1)] = 0.5 * (bf[idx(gw, gh+1)] + bf[idx(gw, gh)]);
+        }
+
+        // encode
+        for i in 0..GRID_WITH_BOUNDARY_SIZE {
+            rgb[i] = enc_rgb(rf[i], gf[i], bf[i]);
+        }
+    }
+
+    fn diffuse_vel(
+        b: i32,
+        field: &mut [u16; GRID_WITH_BOUNDARY_SIZE],
+        dt: f32,
+    ) {
+        let gw = GRID_WIDTH  as usize;
+        let gh = GRID_HEIGHT as usize;
+        let a   = dt * VEL_VISC * (GRID_WIDTH as f32).max(GRID_HEIGHT as f32);
+        let inv = 1.0 / (1.0 + 4.0 * a);
+
+        // decode + snapshot
+        let mut f  = [0.0f32; GRID_WITH_BOUNDARY_SIZE];
+        let mut f0 = [0.0f32; GRID_WITH_BOUNDARY_SIZE];
+        for i in 0..GRID_WITH_BOUNDARY_SIZE {
+            let v = dec_vel(field[i]);
+            f[i] = v; f0[i] = v;
+        }
+
+        for _ in 0..DIFF_ITER {
+            for y in 1..=gh {
+                for x in 1..=gw {
+                    let i = idx(x, y);
+                    f[i] = (f0[i] + a * (f[idx(x-1,y)] + f[idx(x+1,y)]
+                                       + f[idx(x,y-1)] + f[idx(x,y+1)])) * inv;
+                }
+            }
+            // inline boundary on f32 scratch
+            for y in 1..=gh {
+                f[idx(0,    y)] = if b == 1 { -f[idx(1,  y)] } else { f[idx(1,  y)] };
+                f[idx(gw+1, y)] = if b == 1 { -f[idx(gw, y)] } else { f[idx(gw, y)] };
+            }
+            for x in 1..=gw {
+                f[idx(x, 0   )] = if b == 2 { -f[idx(x, 1 )] } else { f[idx(x, 1 )] };
+                f[idx(x, gh+1)] = if b == 2 { -f[idx(x, gh)] } else { f[idx(x, gh)] };
+            }
+            f[idx(0,    0   )] = 0.5*(f[idx(1,  0   )]+f[idx(0,  1  )]);
+            f[idx(gw+1, 0   )] = 0.5*(f[idx(gw, 0   )]+f[idx(gw, 1  )]);
+            f[idx(0,    gh+1)] = 0.5*(f[idx(1,  gh+1)]+f[idx(0,  gh )]);
+            f[idx(gw+1, gh+1)] = 0.5*(f[idx(gw, gh+1)]+f[idx(gw, gh )]);
+        }
+
+        // encode
+        for i in 0..GRID_WITH_BOUNDARY_SIZE { field[i] = enc_vel(f[i]); }
     }
 
     // ------------------------------------------------------------------ //
@@ -202,7 +324,7 @@ impl Grid {
         let gw = GRID_WIDTH  as usize;
         let gh = GRID_HEIGHT as usize;
 
-        // Decode everything once before the hot loop
+        // decode everything once before the hot loop
         let mut uf = [0.0f32; GRID_WITH_BOUNDARY_SIZE];
         let mut vf = [0.0f32; GRID_WITH_BOUNDARY_SIZE];
         let mut rf = [0.0f32; GRID_WITH_BOUNDARY_SIZE];
@@ -230,7 +352,7 @@ impl Grid {
                 let s1 = px - x0 as f32; let s0 = 1.0 - s1;
                 let t1 = py - y0 as f32; let t0 = 1.0 - t1;
 
-                // Compute bilinear weights once, apply to all 3 channels
+                // compute bilinear weights once, apply to all 3 channels
                 let w00 = s0 * t0; let w01 = s0 * t1;
                 let w10 = s1 * t0; let w11 = s1 * t1;
 
@@ -346,6 +468,12 @@ impl Grid {
     // ------------------------------------------------------------------ //
 
     pub fn vel_step(&mut self, dt: f32) {
+        // Skip vel diffuse entirely if viscosity is zero — saves the stack alloc
+        if VEL_VISC > 0.0 {
+            Self::diffuse_vel(1, &mut self.u, dt);
+            Self::diffuse_vel(2, &mut self.v, dt);
+            self.project();
+        }
         let u_snap = self.u;
         let v_snap = self.v;
         Self::advect_vel(1, &mut self.u, &u_snap, &v_snap, dt);
@@ -354,6 +482,7 @@ impl Grid {
     }
 
     pub fn dens_step(&mut self, dt: f32) {
+        Self::diffuse_rgb(&mut self.rgb, dt);
         let u_snap = self.u;
         let v_snap = self.v;
         Self::advect_rgb(&mut self.rgb, &u_snap, &v_snap, dt);
