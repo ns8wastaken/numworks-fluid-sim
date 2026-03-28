@@ -6,10 +6,11 @@ mod nadk;
 mod grid;
 
 use nadk::display::{Color565, SCREEN_RECT, push_rect};
-use nadk::keyboard::{Key, KeyboardState};
+use nadk::keyboard::Key;
 use nadk::utils::wait_ok_released;
 use grid::Grid;
 
+use crate::nadk::keyboard::InputManager;
 use crate::nadk::time::get_current_time_seconds;
 
 const SCALE_X: usize = 320 / grid::GRID_WIDTH;
@@ -105,34 +106,41 @@ fn main() {
     let power_mult = 0.075;
 
     let mut current_color_idx = 0;
+    let mut constant_stream = false;
+
+    let mut im = InputManager::new();
 
     loop {
-        let kb = KeyboardState::scan();
+        im.scan();
         let dt = 0.1;
 
-        if kb.key_down(Key::Ok) {
+        if im.is_keydown(Key::Ok) {
             break;
         }
-        if kb.key_down(Key::Backspace) || kb.key_down(Key::Exe) {
+        if im.is_keydown(Key::Backspace) {
             grid = Grid::new();
         }
+        if im.is_just_pressed(Key::Exe) {
+            constant_stream = !constant_stream;
+        }
 
-        if kb.key_down(Key::Zero)  { current_color_idx = 0; }
-        if kb.key_down(Key::One)   { current_color_idx = 1; }
-        if kb.key_down(Key::Two)   { current_color_idx = 2; }
-        if kb.key_down(Key::Three) { current_color_idx = 3; }
-        if kb.key_down(Key::Four)  { current_color_idx = 4; }
-        if kb.key_down(Key::Five)  { current_color_idx = 5; }
-        if kb.key_down(Key::Six)   { current_color_idx = 6; }
-        if kb.key_down(Key::Seven) { current_color_idx = 7; }
-        if kb.key_down(Key::Eight) { current_color_idx = 8; }
-        if kb.key_down(Key::Nine)  { current_color_idx = 9; }
+        // Switch colors
+        if im.is_just_pressed(Key::Zero)  { current_color_idx = 0; }
+        if im.is_just_pressed(Key::One)   { current_color_idx = 1; }
+        if im.is_just_pressed(Key::Two)   { current_color_idx = 2; }
+        if im.is_just_pressed(Key::Three) { current_color_idx = 3; }
+        if im.is_just_pressed(Key::Four)  { current_color_idx = 4; }
+        if im.is_just_pressed(Key::Five)  { current_color_idx = 5; }
+        if im.is_just_pressed(Key::Six)   { current_color_idx = 6; }
+        if im.is_just_pressed(Key::Seven) { current_color_idx = 7; }
+        if im.is_just_pressed(Key::Eight) { current_color_idx = 8; }
+        if im.is_just_pressed(Key::Nine)  { current_color_idx = 9; }
 
         // Clear sources from last frame
         grid.clear_sources();
 
         // Add density in the center
-        if kb.key_down(Key::Back) || get_current_time_seconds() < 0.75 {
+        if im.is_keydown(Key::Back) || get_current_time_seconds() < 0.5 {
             let curr_color = FLUID_COLORS[current_color_idx]
                 .get_components();
 
@@ -146,10 +154,10 @@ fn main() {
         let mut fx = 0.0;
         let mut fy = 0.0;
 
-        if kb.key_down(Key::Left)  { fx -= 1.0; }
-        if kb.key_down(Key::Right) { fx += 1.0; }
-        if kb.key_down(Key::Up)    { fy -= 1.0; }
-        if kb.key_down(Key::Down)  { fy += 1.0; }
+        if im.is_keydown(Key::Left)  { fx -= 1.0; }
+        if im.is_keydown(Key::Right) { fx += 1.0; }
+        if im.is_keydown(Key::Up)    { fy -= 1.0; }
+        if im.is_keydown(Key::Down)  { fy += 1.0; }
 
         let mag = fast_sqrt(fx*fx + fy*fy);
         if mag > 0.0 {
