@@ -10,8 +10,31 @@ use nadk::keyboard::{Key, KeyboardState};
 use nadk::utils::wait_ok_released;
 use grid::Grid;
 
+use crate::nadk::time::get_current_time_seconds;
+
 const SCALE_X: usize = 320 / grid::GRID_WIDTH;
 const SCALE_Y: usize = 240 / grid::GRID_HEIGHT;
+
+const CIRCLE_CX: f32       = grid::GRID_WIDTH as f32 / 2.0;
+const CIRCLE_CY: f32       = grid::GRID_HEIGHT as f32 / 2.0;
+const CIRCLE_R_OUTER: f32  = 20.0;
+const CIRCLE_R_INNER: f32  = 10.0; // fade start
+const CIRCLE_OUTER_SQ: f32 = CIRCLE_R_OUTER * CIRCLE_R_OUTER;
+const CIRCLE_INNER_SQ: f32 = CIRCLE_R_INNER * CIRCLE_R_INNER;
+const CIRCLE_MAX_DENS: f32 = 0.5;
+
+const FLUID_COLORS: [Color565; 10] = [
+    Color565::from_rgb888(0, 255, 255),   // Electric Cyan
+    Color565::from_rgb888(0, 255, 0),     // Neon Green
+    Color565::from_rgb888(255, 0, 127),   // Hot Pink
+    Color565::from_rgb888(255, 128, 0),   // Vivid Orange
+    Color565::from_rgb888(255, 255, 0),   // Solar Yellow
+    Color565::from_rgb888(178, 0, 255),   // Electric Purple
+    Color565::from_rgb888(51, 102, 255),  // Ultramarine
+    Color565::from_rgb888(255, 0, 51),    // Bright Crimson
+    Color565::from_rgb888(0, 255, 128),   // Spring Green
+    Color565::from_rgb888(255, 255, 255), // Plasma White
+];
 
 configure_app!(b"FluidSim\0", 10, "../target/icon.nwi", 745);
 
@@ -25,12 +48,47 @@ pub fn fast_sqrt(x: f32) -> f32 {
     y * x // 1/sqrt(x) * x = sqrt(x)
 }
 
-fn density_to_color(d: f32) -> Color565 {
-    let d = d.clamp(0.0, 1.0);
-    let r = (d * 0.0) as u16;
-    let g = (d * 255.0) as u16;
-    let b = (d * 255.0) as u16;
-    Color565::from_rgb888(r, g, b)
+fn density_to_color(r: f32, g: f32, b: f32) -> Color565 {
+    // Clamp to 0.0 - 1.0 to prevent overflow artifacts
+    let r = r.clamp(0.0, 1.0);
+    let g = g.clamp(0.0, 1.0);
+    let b = b.clamp(0.0, 1.0);
+
+    // Map to 8-bit integers (from_rgb888 handles the 565 conversion)
+    let r_u8 = (r * 255.0) as u16;
+    let g_u8 = (g * 255.0) as u16;
+    let b_u8 = (b * 255.0) as u16;
+
+    Color565::from_rgb888(r_u8, g_u8, b_u8)
+}
+
+fn spawn_density(grid: &mut Grid, r: f32, g: f32, b: f32) {
+    for y in 1..=grid::GRID_HEIGHT as i32 {
+        for x in 1..=grid::GRID_WIDTH as i32 {
+            let dx = x as f32 - CIRCLE_CX;
+            let dy = y as f32 - CIRCLE_CY;
+            let dist_sq = dx * dx + dy * dy;
+
+            if dist_sq <= CIRCLE_OUTER_SQ {
+                let idx = grid::idx(x as usize, y as usize);
+
+                // Calculate intensity based on distance
+                let falloff = if dist_sq <= CIRCLE_INNER_SQ {
+                    1.0
+                } else {
+                    (CIRCLE_OUTER_SQ - dist_sq) / (CIRCLE_OUTER_SQ - CIRCLE_INNER_SQ)
+                };
+
+                let amount = falloff * CIRCLE_MAX_DENS;
+
+                // Directly use your RGB properties
+                // Assuming these are f32 (0.0 to 1.0)
+                grid.r_prev[idx] += amount * r;
+                grid.g_prev[idx] += amount * g;
+                grid.b_prev[idx] += amount * b;
+            }
+        }
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -44,15 +102,9 @@ fn main() {
     let viscosity = 0.0001;
     let diffusion = 0.0001;
 
-    let circle_cx = grid::GRID_WIDTH as f32 / 2.0;
-    let circle_cy = grid::GRID_HEIGHT as f32 / 2.0;
-    let circle_r_outer = 20.0;
-    let circle_r_inner = 10.0; // fade start
-    let circle_outer_sq = circle_r_outer * circle_r_outer;
-    let circle_inner_sq = circle_r_inner * circle_r_inner;
-    let circle_max_dens = 0.16;
-
     let power_mult = 0.075;
+
+    let mut current_color_idx = 0;
 
     loop {
         let kb = KeyboardState::scan();
@@ -61,28 +113,34 @@ fn main() {
         if kb.key_down(Key::Ok) {
             break;
         }
+        if kb.key_down(Key::Backspace) || kb.key_down(Key::Exe) {
+            grid = Grid::new();
+        }
+
+        if kb.key_down(Key::Zero)  { current_color_idx = 0; }
+        if kb.key_down(Key::One)   { current_color_idx = 1; }
+        if kb.key_down(Key::Two)   { current_color_idx = 2; }
+        if kb.key_down(Key::Three) { current_color_idx = 3; }
+        if kb.key_down(Key::Four)  { current_color_idx = 4; }
+        if kb.key_down(Key::Five)  { current_color_idx = 5; }
+        if kb.key_down(Key::Six)   { current_color_idx = 6; }
+        if kb.key_down(Key::Seven) { current_color_idx = 7; }
+        if kb.key_down(Key::Eight) { current_color_idx = 8; }
+        if kb.key_down(Key::Nine)  { current_color_idx = 9; }
 
         // Clear sources from last frame
         grid.clear_sources();
 
         // Add density in the center
-        if kb.key_down(Key::Back) {
-            for y in 1..=grid::GRID_HEIGHT as i32 {
-                for x in 1..=grid::GRID_WIDTH as i32 {
-                    let dx = x as f32 - circle_cx;
-                    let dy = y as f32 - circle_cy;
-                    let dist_sq = dx * dx + dy * dy;
+        if kb.key_down(Key::Back) || get_current_time_seconds() < 0.75 {
+            let curr_color = FLUID_COLORS[current_color_idx]
+                .get_components();
 
-                    let idx = grid::idx(x as usize, y as usize);
+            let r = curr_color.0 as f32 / 31.0;
+            let g = curr_color.1 as f32 / 63.0;
+            let b = curr_color.2 as f32 / 31.0;
 
-                    if dist_sq <= circle_inner_sq {
-                        grid.density_prev[idx] = circle_max_dens;
-                    } else if dist_sq <= circle_outer_sq {
-                        let fraction = (circle_outer_sq - dist_sq) / (circle_outer_sq - circle_inner_sq);
-                        grid.density_prev[idx] = fraction * circle_max_dens;
-                    }
-                }
-            }
+            spawn_density(&mut grid, r, g, b);
         }
 
         let mut fx = 0.0;
@@ -105,7 +163,7 @@ fn main() {
             grid.apply_circular_source(
                 grid::GRID_WIDTH as f32 / 2.0,
                 grid::GRID_HEIGHT as f32 / 2.0,
-                circle_r_outer,
+                CIRCLE_R_OUTER,
                 fx,
                 fy,
                 dt
@@ -117,15 +175,19 @@ fn main() {
         // Render density into framebuffer
         for gy in 0..grid::GRID_HEIGHT {
             for gx in 0..grid::GRID_WIDTH {
-                let d = grid.density[grid::idx(gx + 1, gy + 1)];
-                let color = density_to_color(d);
+                let idx = grid::idx(gx + 1, gy + 1);
+                let r_val = grid.r[idx];
+                let g_val = grid.g[idx];
+                let b_val = grid.b[idx];
+
+                let color = density_to_color(r_val, g_val, b_val);
 
                 // Fill SCALE_X × SCALE_Y block of screen pixels
                 for py in 0..SCALE_Y {
+                    let sy_offset = (gy * SCALE_Y + py) * 320;
                     for px in 0..SCALE_X {
                         let sx = gx * SCALE_X + px;
-                        let sy = gy * SCALE_Y + py;
-                        framebuffer[sy * 320 + sx] = color;
+                        framebuffer[sy_offset + sx] = color;
                     }
                 }
             }

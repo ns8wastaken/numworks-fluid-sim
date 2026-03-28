@@ -28,19 +28,29 @@ pub struct Grid {
     pub v:            [f32; GRID_WITH_BOUNDARY_SIZE],
     pub u_prev:       [f32; GRID_WITH_BOUNDARY_SIZE],
     pub v_prev:       [f32; GRID_WITH_BOUNDARY_SIZE],
-    pub density:      [f32; GRID_WITH_BOUNDARY_SIZE],
-    pub density_prev: [f32; GRID_WITH_BOUNDARY_SIZE],
+
+    // Dye Channels
+    pub r:       [f32; GRID_WITH_BOUNDARY_SIZE],
+    pub g:       [f32; GRID_WITH_BOUNDARY_SIZE],
+    pub b:       [f32; GRID_WITH_BOUNDARY_SIZE],
+    pub r_prev:  [f32; GRID_WITH_BOUNDARY_SIZE],
+    pub g_prev:  [f32; GRID_WITH_BOUNDARY_SIZE],
+    pub b_prev:  [f32; GRID_WITH_BOUNDARY_SIZE],
 }
 
 impl Grid {
     pub fn new() -> Self {
         Self {
-            u:            [0.0; GRID_WITH_BOUNDARY_SIZE],
-            v:            [0.0; GRID_WITH_BOUNDARY_SIZE],
-            u_prev:       [0.0; GRID_WITH_BOUNDARY_SIZE],
-            v_prev:       [0.0; GRID_WITH_BOUNDARY_SIZE],
-            density:      [0.0; GRID_WITH_BOUNDARY_SIZE],
-            density_prev: [0.0; GRID_WITH_BOUNDARY_SIZE],
+            u:      [0.0; GRID_WITH_BOUNDARY_SIZE],
+            v:      [0.0; GRID_WITH_BOUNDARY_SIZE],
+            u_prev: [0.0; GRID_WITH_BOUNDARY_SIZE],
+            v_prev: [0.0; GRID_WITH_BOUNDARY_SIZE],
+            r:      [0.0; GRID_WITH_BOUNDARY_SIZE],
+            g:      [0.0; GRID_WITH_BOUNDARY_SIZE],
+            b:      [0.0; GRID_WITH_BOUNDARY_SIZE],
+            r_prev: [0.0; GRID_WITH_BOUNDARY_SIZE],
+            g_prev: [0.0; GRID_WITH_BOUNDARY_SIZE],
+            b_prev: [0.0; GRID_WITH_BOUNDARY_SIZE],
         }
     }
 
@@ -80,10 +90,6 @@ impl Grid {
         }
     }
 
-    pub fn add_source(&mut self, dt: f32) {
-        Self::add_source_field(&mut self.density, &self.density_prev, dt);
-    }
-
     fn add_source_uv(&mut self, dt: f32) {
         let u_prev = self.u_prev;
         let v_prev = self.v_prev;
@@ -96,7 +102,9 @@ impl Grid {
     // ------------------------------------------------------------------ //
 
     fn swap_density(&mut self) {
-        core::mem::swap(&mut self.density, &mut self.density_prev);
+        core::mem::swap(&mut self.r, &mut self.r_prev);
+        core::mem::swap(&mut self.g, &mut self.g_prev);
+        core::mem::swap(&mut self.b, &mut self.b_prev);
     }
 
     fn swap_u(&mut self) {
@@ -134,11 +142,6 @@ impl Grid {
             }
             Self::set_bnd(b, field);
         }
-    }
-
-    fn diffuse(&mut self, diff: f32, dt: f32) {
-        let density_prev = self.density_prev;
-        Self::diffuse_field(0, &mut self.density, &density_prev, diff, dt);
     }
 
     fn diffuse_u(&mut self, visc: f32, dt: f32) {
@@ -189,13 +192,6 @@ impl Grid {
         }
 
         Self::set_bnd(b, field);
-    }
-
-    fn advect(&mut self, dt: f32) {
-        let density_prev = self.density_prev;
-        let u = self.u;
-        let v = self.v;
-        Self::advect_field(0, &mut self.density, &density_prev, &u, &v, dt);
     }
 
     fn advect_u(&mut self, dt: f32) {
@@ -263,11 +259,25 @@ impl Grid {
     // ------------------------------------------------------------------ //
 
     pub fn dens_step(&mut self, diff: f32, dt: f32) {
-        self.add_source(dt);
+        // self.add_source(dt);
+        // self.swap_density();
+        // self.diffuse(diff, dt);
+        // self.swap_density();
+        // self.advect(dt);
+        // 1. Add sources to all channels
+        Self::add_source_field(&mut self.r, &self.r_prev, dt);
+        Self::add_source_field(&mut self.g, &self.g_prev, dt);
+        Self::add_source_field(&mut self.b, &self.b_prev, dt);
+
         self.swap_density();
-        self.diffuse(diff, dt);
+        Self::diffuse_field(0, &mut self.r, &self.r_prev, diff, dt);
+        Self::diffuse_field(0, &mut self.g, &self.g_prev, diff, dt);
+        Self::diffuse_field(0, &mut self.b, &self.b_prev, diff, dt);
+
         self.swap_density();
-        self.advect(dt);
+        Self::advect_field(0, &mut self.r, &self.r_prev, &self.u, &self.v, dt);
+        Self::advect_field(0, &mut self.g, &self.g_prev, &self.u, &self.v, dt);
+        Self::advect_field(0, &mut self.b, &self.b_prev, &self.u, &self.v, dt);
     }
 
     pub fn vel_step(&mut self, visc: f32, dt: f32) {
@@ -327,7 +337,9 @@ impl Grid {
                         (r_outer_sq - dist_sq) / (r_outer_sq - r_inner_sq)
                     };
 
-                    self.density_prev[i] = max_density * falloff;
+                    self.r_prev[i] = max_density * falloff;
+                    self.g_prev[i] = max_density * falloff;
+                    self.b_prev[i] = max_density * falloff;
 
                     self.u[i] += fx * falloff * dt;
                     self.v[i] += fy * falloff * dt;
@@ -337,8 +349,10 @@ impl Grid {
     }
 
     pub fn clear_sources(&mut self) {
-        self.u_prev       = [0.0; GRID_WITH_BOUNDARY_SIZE];
-        self.v_prev       = [0.0; GRID_WITH_BOUNDARY_SIZE];
-        self.density_prev = [0.0; GRID_WITH_BOUNDARY_SIZE];
+        self.u_prev = [0.0; GRID_WITH_BOUNDARY_SIZE];
+        self.v_prev = [0.0; GRID_WITH_BOUNDARY_SIZE];
+        self.r_prev = [0.0; GRID_WITH_BOUNDARY_SIZE];
+        self.g_prev = [0.0; GRID_WITH_BOUNDARY_SIZE];
+        self.b_prev = [0.0; GRID_WITH_BOUNDARY_SIZE];
     }
 }
