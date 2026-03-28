@@ -22,18 +22,18 @@ const CIRCLE_R_OUTER: f32  = 20.0;
 const CIRCLE_R_INNER: f32  = 10.0; // fade start
 const CIRCLE_OUTER_SQ: f32 = CIRCLE_R_OUTER * CIRCLE_R_OUTER;
 const CIRCLE_INNER_SQ: f32 = CIRCLE_R_INNER * CIRCLE_R_INNER;
-const CIRCLE_MAX_DENS: f32 = 0.5;
+const CIRCLE_MAX_DENS: f32 = 0.2;
 
 const FLUID_COLORS: [Color565; 10] = [
-    Color565::from_rgb888(0, 255, 255),   // Electric Cyan
-    Color565::from_rgb888(0, 255, 0),     // Neon Green
-    Color565::from_rgb888(255, 0, 127),   // Hot Pink
+    Color565::from_rgb888(0,   255, 255), // Electric Cyan
+    Color565::from_rgb888(0,   255, 0),   // Neon Green
+    Color565::from_rgb888(255, 0,   127), // Hot Pink
     Color565::from_rgb888(255, 128, 0),   // Vivid Orange
     Color565::from_rgb888(255, 255, 0),   // Solar Yellow
-    Color565::from_rgb888(178, 0, 255),   // Electric Purple
-    Color565::from_rgb888(51, 102, 255),  // Ultramarine
-    Color565::from_rgb888(255, 0, 51),    // Bright Crimson
-    Color565::from_rgb888(0, 255, 128),   // Spring Green
+    Color565::from_rgb888(178, 0,   255), // Electric Purple
+    Color565::from_rgb888(51,  102, 255), // Ultramarine
+    Color565::from_rgb888(255, 0,   51),  // Bright Crimson
+    Color565::from_rgb888(0,   255, 128), // Spring Green
     Color565::from_rgb888(255, 255, 255), // Plasma White
 ];
 
@@ -50,12 +50,10 @@ pub fn fast_sqrt(x: f32) -> f32 {
 }
 
 fn density_to_color(r: f32, g: f32, b: f32) -> Color565 {
-    // Clamp to 0.0 - 1.0 to prevent overflow artifacts
     let r = r.clamp(0.0, 1.0);
     let g = g.clamp(0.0, 1.0);
     let b = b.clamp(0.0, 1.0);
 
-    // Map to 8-bit integers (from_rgb888 handles the 565 conversion)
     let r_u8 = (r * 255.0) as u16;
     let g_u8 = (g * 255.0) as u16;
     let b_u8 = (b * 255.0) as u16;
@@ -82,8 +80,6 @@ fn spawn_density(grid: &mut Grid, r: f32, g: f32, b: f32) {
 
                 let amount = falloff * CIRCLE_MAX_DENS;
 
-                // Directly use your RGB properties
-                // Assuming these are f32 (0.0 to 1.0)
                 grid.r_prev[idx] += amount * r;
                 grid.g_prev[idx] += amount * g;
                 grid.b_prev[idx] += amount * b;
@@ -140,7 +136,7 @@ fn main() {
         grid.clear_sources();
 
         // Add density in the center
-        if im.is_keydown(Key::Back) || get_current_time_seconds() < 0.5 {
+        if im.is_keydown(Key::Back) || get_current_time_seconds() < 1.0 || constant_stream {
             let curr_color = FLUID_COLORS[current_color_idx]
                 .get_components();
 
