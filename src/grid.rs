@@ -1,56 +1,83 @@
 // Possible values: 320x240, 160x120, 80x60, 64x48
-pub const GRID_WIDTH: i32                  = 80;
-pub const GRID_HEIGHT: i32                 = 60;
-pub const GRID_WIDTH_WITH_BOUNDARY: usize  = GRID_WIDTH as usize + 2;
+pub const GRID_WIDTH:  i32 = 64;
+pub const GRID_HEIGHT: i32 = 48;
+pub const GRID_WIDTH_WITH_BOUNDARY:  usize = GRID_WIDTH  as usize + 2;
 pub const GRID_HEIGHT_WITH_BOUNDARY: usize = GRID_HEIGHT as usize + 2;
-pub const GRID_WITH_BOUNDARY_SIZE: usize   = GRID_WIDTH_WITH_BOUNDARY * GRID_HEIGHT_WITH_BOUNDARY;
+pub const GRID_WITH_BOUNDARY_SIZE:   usize = GRID_WIDTH_WITH_BOUNDARY
+                                           * GRID_HEIGHT_WITH_BOUNDARY;
 
-macro_rules! idx {
-    ($x:expr, $y:expr) => {
-        $x as usize + GRID_WIDTH_WITH_BOUNDARY * $y as usize
-    };
-}
+const SIM_STEPS: usize = 10;
 
+// Maximum representable velocity magnitude.
+// smaller = more precision.
+const VEL_MAX: f32 = 10.0;
+
+// ------------------------------------------------------------------ //
+//  index helper                                                        //
+// ------------------------------------------------------------------ //
+
+#[inline(always)]
 pub const fn idx(x: usize, y: usize) -> usize {
     x + GRID_WIDTH_WITH_BOUNDARY * y
 }
 
-/* The x's are the boundary, the O's are what will be visible
- * xxxxx
- * xOOOx
- * xOOOx
- * xOOOx
- * xxxxx
- */
+// ------------------------------------------------------------------ //
+//  fixed-point encode / decode                                         //
+// ------------------------------------------------------------------ //
+
+/// Encode a velocity value in [-VEL_MAX, +VEL_MAX] to u16.
+#[inline(always)]
+fn enc_vel(v: f32) -> u16 {
+    let norm = (v / VEL_MAX).clamp(-1.0, 1.0);
+    (norm * 32767.0 + 32768.5) as u16
+}
+
+/// Decode a u16 velocity back to f32.
+#[inline(always)]
+fn dec_vel(raw: u16) -> f32 {
+    (raw as f32 - 32768.0) / 32767.0 * VEL_MAX
+}
+
+/// Encode a density value in [0, 1] to u16.
+#[inline(always)]
+fn enc_den(v: f32) -> u16 {
+    (v.clamp(0.0, 1.0) * 65535.0 + 0.5) as u16
+}
+
+/// Decode a u16 density back to f32.
+#[inline(always)]
+fn dec_den(raw: u16) -> f32 {
+    raw as f32 / 65535.0
+}
+
+// ------------------------------------------------------------------ //
+//  Grid                                                                //
+// ------------------------------------------------------------------ //
 
 pub struct Grid {
-    pub u:      [f32; GRID_WITH_BOUNDARY_SIZE],
-    pub v:      [f32; GRID_WITH_BOUNDARY_SIZE],
-    pub u_prev: [f32; GRID_WITH_BOUNDARY_SIZE],
-    pub v_prev: [f32; GRID_WITH_BOUNDARY_SIZE],
+    /// Velocity X — fixed-point, signed, bias 0x8000
+    pub u: [u16; GRID_WITH_BOUNDARY_SIZE],
+    /// Velocity Y — fixed-point, signed, bias 0x8000
+    pub v: [u16; GRID_WITH_BOUNDARY_SIZE],
 
-    // Dye Channels
-    pub r:       [f32; GRID_WITH_BOUNDARY_SIZE],
-    pub g:       [f32; GRID_WITH_BOUNDARY_SIZE],
-    pub b:       [f32; GRID_WITH_BOUNDARY_SIZE],
-    pub r_prev:  [f32; GRID_WITH_BOUNDARY_SIZE],
-    pub g_prev:  [f32; GRID_WITH_BOUNDARY_SIZE],
-    pub b_prev:  [f32; GRID_WITH_BOUNDARY_SIZE],
+    /// Dye channels — fixed-point, unsigned
+    pub r: [u16; GRID_WITH_BOUNDARY_SIZE],
+    pub g: [u16; GRID_WITH_BOUNDARY_SIZE],
+    pub b: [u16; GRID_WITH_BOUNDARY_SIZE],
 }
+
+// Zero velocity encodes as 0x8000 (midpoint), zero density as 0x0000.
+const ZERO_VEL: u16 = 0x8000;
+const ZERO_DEN: u16 = 0x0000;
 
 impl Grid {
     pub fn new() -> Self {
         Self {
-            u:      [0.0; GRID_WITH_BOUNDARY_SIZE],
-            v:      [0.0; GRID_WITH_BOUNDARY_SIZE],
-            u_prev: [0.0; GRID_WITH_BOUNDARY_SIZE],
-            v_prev: [0.0; GRID_WITH_BOUNDARY_SIZE],
-            r:      [0.0; GRID_WITH_BOUNDARY_SIZE],
-            g:      [0.0; GRID_WITH_BOUNDARY_SIZE],
-            b:      [0.0; GRID_WITH_BOUNDARY_SIZE],
-            r_prev: [0.0; GRID_WITH_BOUNDARY_SIZE],
-            g_prev: [0.0; GRID_WITH_BOUNDARY_SIZE],
-            b_prev: [0.0; GRID_WITH_BOUNDARY_SIZE],
+            u: [ZERO_VEL; GRID_WITH_BOUNDARY_SIZE],
+            v: [ZERO_VEL; GRID_WITH_BOUNDARY_SIZE],
+            r: [ZERO_DEN; GRID_WITH_BOUNDARY_SIZE],
+            g: [ZERO_DEN; GRID_WITH_BOUNDARY_SIZE],
+            b: [ZERO_DEN; GRID_WITH_BOUNDARY_SIZE],
         }
     }
 
@@ -58,152 +85,174 @@ impl Grid {
     //  boundary                                                            //
     // ------------------------------------------------------------------ //
 
-    fn set_bnd(b: i32, field: &mut [f32; GRID_WITH_BOUNDARY_SIZE]) {
-        // left and right walls
-        for y in 1..=GRID_HEIGHT {
-            field[idx!(0,              y)] = if b == 1 { -field[idx!(1,          y)] } else { field[idx!(1,          y)] };
-            field[idx!(GRID_WIDTH + 1, y)] = if b == 1 { -field[idx!(GRID_WIDTH, y)] } else { field[idx!(GRID_WIDTH, y)] };
+    fn set_bnd_vel(b: i32, field: &mut [u16; GRID_WITH_BOUNDARY_SIZE]) {
+        for y in 1..=GRID_HEIGHT as usize {
+            let inner_l = dec_vel(field[idx(1,           y)]);
+            let inner_r = dec_vel(field[idx(GRID_WIDTH as usize, y)]);
+            field[idx(0,                       y)] = enc_vel(if b == 1 { -inner_l } else { inner_l });
+            field[idx(GRID_WIDTH as usize + 1, y)] = enc_vel(if b == 1 { -inner_r } else { inner_r });
         }
-        // top and bottom walls
-        for x in 1..=GRID_WIDTH {
-            field[idx!(x,  0              )] = if b == 2 { -field[idx!(x,  1          )] } else { field[idx!(x,  1)] };
-            field[idx!(x,  GRID_HEIGHT + 1)] = if b == 2 { -field[idx!(x,  GRID_HEIGHT)] } else { field[idx!(x,  GRID_HEIGHT)] };
+        for x in 1..=GRID_WIDTH as usize {
+            let inner_t = dec_vel(field[idx(x, 1)]);
+            let inner_b = dec_vel(field[idx(x, GRID_HEIGHT as usize)]);
+            field[idx(x, 0                       )] = enc_vel(if b == 2 { -inner_t } else { inner_t });
+            field[idx(x, GRID_HEIGHT as usize + 1)] = enc_vel(if b == 2 { -inner_b } else { inner_b });
         }
-        // corners — average of the two neighbours
-        field[idx!(0,              0            )] = 0.5 * (field[idx!(1,          0            )] + field[idx!(0,          1)]);
-        field[idx!(GRID_WIDTH + 1, 0            )] = 0.5 * (field[idx!(GRID_WIDTH, 0            )] + field[idx!(GRID_WIDTH, 1)]);
-        field[idx!(0,              GRID_HEIGHT+1)] = 0.5 * (field[idx!(1,          GRID_HEIGHT+1)] + field[idx!(0,          GRID_HEIGHT)]);
-        field[idx!(GRID_WIDTH + 1, GRID_HEIGHT+1)] = 0.5 * (field[idx!(GRID_WIDTH, GRID_HEIGHT+1)] + field[idx!(GRID_WIDTH, GRID_HEIGHT)]);
+        // corners
+        let gw = GRID_WIDTH  as usize;
+        let gh = GRID_HEIGHT as usize;
+        field[idx(0,    0   )] = enc_vel(0.5 * (dec_vel(field[idx(1,  0   )]) + dec_vel(field[idx(0,  1 )])));
+        field[idx(gw+1, 0   )] = enc_vel(0.5 * (dec_vel(field[idx(gw, 0   )]) + dec_vel(field[idx(gw, 1 )])));
+        field[idx(0,    gh+1)] = enc_vel(0.5 * (dec_vel(field[idx(1,  gh+1)]) + dec_vel(field[idx(0,  gh)])));
+        field[idx(gw+1, gh+1)] = enc_vel(0.5 * (dec_vel(field[idx(gw, gh+1)]) + dec_vel(field[idx(gw, gh)])));
     }
 
-    // ------------------------------------------------------------------ //
-    //  sources                                                             //
-    // ------------------------------------------------------------------ //
-
-    fn add_source_field(
-        field: &mut [f32; GRID_WITH_BOUNDARY_SIZE],
-        src: &[f32; GRID_WITH_BOUNDARY_SIZE],
-        dt: f32
-    ) {
-        for i in 0..GRID_WITH_BOUNDARY_SIZE {
-            field[i] += dt * src[i];
+    fn set_bnd_den(field: &mut [u16; GRID_WITH_BOUNDARY_SIZE]) {
+        for y in 1..=GRID_HEIGHT as usize {
+            field[idx(0,                       y)] = field[idx(1,                    y)];
+            field[idx(GRID_WIDTH as usize + 1, y)] = field[idx(GRID_WIDTH as usize,  y)];
         }
-    }
+        for x in 1..=GRID_WIDTH as usize {
+            field[idx(x, 0                        )] = field[idx(x, 1)];
+            field[idx(x, GRID_HEIGHT as usize + 1 )] = field[idx(x, GRID_HEIGHT as usize)];
+        }
+        let gw = GRID_WIDTH  as usize;
+        let gh = GRID_HEIGHT as usize;
 
-    fn add_source_uv(&mut self, dt: f32) {
-        let u_prev = self.u_prev;
-        let v_prev = self.v_prev;
-        Self::add_source_field(&mut self.u, &u_prev, dt);
-        Self::add_source_field(&mut self.v, &v_prev, dt);
-    }
-
-    // ------------------------------------------------------------------ //
-    //  swaps                                                               //
-    // ------------------------------------------------------------------ //
-
-    fn swap_density(&mut self) {
-        core::mem::swap(&mut self.r, &mut self.r_prev);
-        core::mem::swap(&mut self.g, &mut self.g_prev);
-        core::mem::swap(&mut self.b, &mut self.b_prev);
-    }
-
-    fn swap_u(&mut self) {
-        core::mem::swap(&mut self.u, &mut self.u_prev);
-    }
-
-    fn swap_v(&mut self) {
-        core::mem::swap(&mut self.v, &mut self.v_prev);
+        // corners = average
+        field[idx(0,    0   )] = ((field[idx(1,  0   )] as u32 + field[idx(0,  1  )] as u32) / 2) as u16;
+        field[idx(gw+1, 0   )] = ((field[idx(gw, 0   )] as u32 + field[idx(gw, 1  )] as u32) / 2) as u16;
+        field[idx(0,    gh+1)] = ((field[idx(1,  gh+1)] as u32 + field[idx(0,  gh )] as u32) / 2) as u16;
+        field[idx(gw+1, gh+1)] = ((field[idx(gw, gh+1)] as u32 + field[idx(gw, gh )] as u32) / 2) as u16;
     }
 
     // ------------------------------------------------------------------ //
-    //  diffuse                                                             //
+    //  diffuse (in-place Gauss-Seidel)                                   //
     // ------------------------------------------------------------------ //
 
-    fn diffuse_field(
+    fn diffuse_vel(
         b: i32,
-        field: &mut [f32; GRID_WITH_BOUNDARY_SIZE],
-        field_prev: &[f32; GRID_WITH_BOUNDARY_SIZE],
-        diff: f32,
-        dt: f32
+        field: &mut [u16; GRID_WITH_BOUNDARY_SIZE],
+        diff: f32, dt: f32
     ) {
         let a = dt * diff * (GRID_WIDTH as f32).max(GRID_HEIGHT as f32);
-        for _ in 0..20 {
-            for y in 1..=GRID_HEIGHT {
-                for x in 1..=GRID_WIDTH {
-                    let neighbors = field[idx!(x-1, y)]
-                                  + field[idx!(x+1, y)]
-                                  + field[idx!(x, y-1)]
-                                  + field[idx!(x, y+1)];
-                    field[idx!(x, y)] = (
-                        field_prev[idx!(x, y)]
-                        + a * neighbors
-                    ) / (1.0 + 4.0 * a);
+        let inv = 1.0 / (1.0 + 4.0 * a);
+        for _ in 0..SIM_STEPS {
+            for y in 1..=GRID_HEIGHT as usize {
+                for x in 1..=GRID_WIDTH as usize {
+                    let center    = dec_vel(field[idx(x, y)]);
+                    let neighbors = dec_vel(field[idx(x-1, y)])
+                                  + dec_vel(field[idx(x+1, y)])
+                                  + dec_vel(field[idx(x, y-1)])
+                                  + dec_vel(field[idx(x, y+1)]);
+                    // center is the "prev" value here (Gauss-Seidel in-place)
+                    field[idx(x, y)] = enc_vel((center + a * neighbors) * inv);
                 }
             }
-            Self::set_bnd(b, field);
+            Self::set_bnd_vel(b, field);
         }
     }
 
-    fn diffuse_u(&mut self, visc: f32, dt: f32) {
-        let u_prev = self.u_prev;
-        Self::diffuse_field(1, &mut self.u, &u_prev, visc, dt);
-    }
-
-    fn diffuse_v(&mut self, visc: f32, dt: f32) {
-        let v_prev = self.v_prev;
-        Self::diffuse_field(2, &mut self.v, &v_prev, visc, dt);
+    fn diffuse_den(
+        field: &mut [u16; GRID_WITH_BOUNDARY_SIZE],
+        diff: f32, dt: f32
+    ) {
+        let a = dt * diff * (GRID_WIDTH as f32).max(GRID_HEIGHT as f32);
+        let inv = 1.0 / (1.0 + 4.0 * a);
+        for _ in 0..SIM_STEPS {
+            for y in 1..=GRID_HEIGHT as usize {
+                for x in 1..=GRID_WIDTH as usize {
+                    let center    = dec_den(field[idx(x, y)]);
+                    let neighbors = dec_den(field[idx(x-1, y)])
+                                  + dec_den(field[idx(x+1, y)])
+                                  + dec_den(field[idx(x, y-1)])
+                                  + dec_den(field[idx(x, y+1)]);
+                    field[idx(x, y)] = enc_den((center + a * neighbors) * inv);
+                }
+            }
+            Self::set_bnd_den(field);
+        }
     }
 
     // ------------------------------------------------------------------ //
     //  advect                                                              //
     // ------------------------------------------------------------------ //
 
-    fn advect_field(
+    fn advect_vel(
         b: i32,
-        field: &mut [f32; GRID_WITH_BOUNDARY_SIZE],
-        field_prev: &[f32; GRID_WITH_BOUNDARY_SIZE],
-        u: &[f32; GRID_WITH_BOUNDARY_SIZE],
-        v: &[f32; GRID_WITH_BOUNDARY_SIZE],
+        field: &mut [u16; GRID_WITH_BOUNDARY_SIZE],
+        u: &[u16; GRID_WITH_BOUNDARY_SIZE],
+        v: &[u16; GRID_WITH_BOUNDARY_SIZE],
         dt: f32,
     ) {
-        let dt0_x = dt * GRID_WIDTH as f32;
+        let dt0_x = dt * GRID_WIDTH  as f32;
         let dt0_y = dt * GRID_HEIGHT as f32;
+        let gw = GRID_WIDTH  as usize;
+        let gh = GRID_HEIGHT as usize;
 
-        for y in 1..=GRID_HEIGHT {
-            for x in 1..=GRID_WIDTH {
-                let mut px = x as f32 - dt0_x * u[idx!(x, y)];
-                let mut py = y as f32 - dt0_y * v[idx!(x, y)];
+        let mut src = [0.0f32; GRID_WITH_BOUNDARY_SIZE];
+        for i in 0..GRID_WITH_BOUNDARY_SIZE {
+            src[i] = dec_vel(field[i]);
+        }
 
-                px = px.clamp(0.5, GRID_WIDTH as f32 + 0.5);
-                py = py.clamp(0.5, GRID_HEIGHT as f32 + 0.5);
+        for y in 1..=gh {
+            for x in 1..=gw {
+                let mut px = x as f32 - dt0_x * dec_vel(u[idx(x, y)]);
+                let mut py = y as f32 - dt0_y * dec_vel(v[idx(x, y)]);
 
-                let x0 = px as i32; let x1 = x0 + 1;
-                let y0 = py as i32; let y1 = y0 + 1;
+                px = px.clamp(0.5, gw as f32 + 0.5);
+                py = py.clamp(0.5, gh as f32 + 0.5);
+
+                let x0 = px as usize; let x1 = x0 + 1;
+                let y0 = py as usize; let y1 = y0 + 1;
 
                 let s1 = px - x0 as f32; let s0 = 1.0 - s1;
                 let t1 = py - y0 as f32; let t0 = 1.0 - t1;
 
-                field[idx!(x, y)] =
-                    s0 * (t0 * field_prev[idx!(x0, y0)]
-                        + t1 * field_prev[idx!(x0, y1)])
-                  + s1 * (t0 * field_prev[idx!(x1, y0)]
-                        + t1 * field_prev[idx!(x1, y1)]);
+                let val = s0 * (t0 * src[idx(x0, y0)] + t1 * src[idx(x0, y1)])
+                        + s1 * (t0 * src[idx(x1, y0)] + t1 * src[idx(x1, y1)]);
+                field[idx(x, y)] = enc_vel(val);
             }
         }
-
-        Self::set_bnd(b, field);
+        Self::set_bnd_vel(b, field);
     }
 
-    fn advect_u(&mut self, dt: f32) {
-        let u_prev = self.u_prev;
-        let v_prev = self.v_prev;
-        Self::advect_field(1, &mut self.u, &u_prev, &u_prev, &v_prev, dt);
-    }
+    fn advect_den(
+        field: &mut [u16; GRID_WITH_BOUNDARY_SIZE],
+        u: &[u16; GRID_WITH_BOUNDARY_SIZE],
+        v: &[u16; GRID_WITH_BOUNDARY_SIZE],
+        dt: f32,
+    ) {
+        let dt0_x = dt * GRID_WIDTH  as f32;
+        let dt0_y = dt * GRID_HEIGHT as f32;
+        let gw = GRID_WIDTH  as usize;
+        let gh = GRID_HEIGHT as usize;
 
-    fn advect_v(&mut self, dt: f32) {
-        let u_prev = self.u_prev;
-        let v_prev = self.v_prev;
-        Self::advect_field(2, &mut self.v, &v_prev, &u_prev, &v_prev, dt);
+        let mut src = [0.0f32; GRID_WITH_BOUNDARY_SIZE];
+        for i in 0..GRID_WITH_BOUNDARY_SIZE {
+            src[i] = dec_den(field[i]);
+        }
+
+        for y in 1..=gh {
+            for x in 1..=gw {
+                let mut px = x as f32 - dt0_x * dec_vel(u[idx(x, y)]);
+                let mut py = y as f32 - dt0_y * dec_vel(v[idx(x, y)]);
+
+                px = px.clamp(0.5, gw as f32 + 0.5);
+                py = py.clamp(0.5, gh as f32 + 0.5);
+
+                let x0 = px as usize; let x1 = x0 + 1;
+                let y0 = py as usize; let y1 = y0 + 1;
+
+                let s1 = px - x0 as f32; let s0 = 1.0 - s1;
+                let t1 = py - y0 as f32; let t0 = 1.0 - t1;
+
+                let val = s0 * (t0 * src[idx(x0, y0)] + t1 * src[idx(x0, y1)])
+                        + s1 * (t0 * src[idx(x1, y0)] + t1 * src[idx(x1, y1)]);
+                field[idx(x, y)] = enc_den(val);
+            }
+        }
+        Self::set_bnd_den(field);
     }
 
     // ------------------------------------------------------------------ //
@@ -211,87 +260,125 @@ impl Grid {
     // ------------------------------------------------------------------ //
 
     fn project(&mut self) {
-        let h_x = 1.0 / GRID_WIDTH as f32;
+        let gw = GRID_WIDTH  as usize;
+        let gh = GRID_HEIGHT as usize;
+        let h_x = 1.0 / GRID_WIDTH  as f32;
         let h_y = 1.0 / GRID_HEIGHT as f32;
 
-        // compute divergence into u_prev, zero pressure into v_prev
-        for y in 1..=GRID_HEIGHT {
-            for x in 1..=GRID_WIDTH {
-                self.u_prev[idx!(x, y)] = -0.5 * (
-                    h_x * (self.u[idx!(x+1, y)] - self.u[idx!(x-1, y)]) +
-                    h_y * (self.v[idx!(x, y+1)] - self.v[idx!(x, y-1)])
+        let mut div = [0.0f32; GRID_WITH_BOUNDARY_SIZE];
+        let mut p   = [0.0f32; GRID_WITH_BOUNDARY_SIZE];
+
+        // -- compute divergence --
+        for y in 1..=gh {
+            for x in 1..=gw {
+                div[idx(x, y)] = -0.5 * (
+                    h_x * (dec_vel(self.u[idx(x+1, y)]) - dec_vel(self.u[idx(x-1, y)]))
+                    + h_y * (dec_vel(self.v[idx(x, y+1)]) - dec_vel(self.v[idx(x, y-1)]))
                 );
-                self.v_prev[idx!(x, y)] = 0.0;
             }
         }
-        Self::set_bnd(0, &mut self.u_prev);
-        Self::set_bnd(0, &mut self.v_prev);
 
-        // Gauss-Seidel pressure solve
-        for _ in 0..20 {
-            for y in 1..=GRID_HEIGHT {
-                for x in 1..=GRID_WIDTH {
-                    self.v_prev[idx!(x, y)] = (
-                          self.u_prev[idx!(x,   y  )]
-                        + self.v_prev[idx!(x-1, y  )]
-                        + self.v_prev[idx!(x+1, y  )]
-                        + self.v_prev[idx!(x,   y-1)]
-                        + self.v_prev[idx!(x,   y+1)]
+        // boundary for divergence
+        for y in 1..=gh {
+            div[idx(0,    y)] = div[idx(1,  y)];
+            div[idx(gw+1, y)] = div[idx(gw, y)];
+        }
+        for x in 1..=gw {
+            div[idx(x, 0   )] = div[idx(x, 1 )];
+            div[idx(x, gh+1)] = div[idx(x, gh)];
+        }
+        div[idx(0,    0   )] = 0.5 * (div[idx(1,  0   )] + div[idx(0,  1  )]);
+        div[idx(gw+1, 0   )] = 0.5 * (div[idx(gw, 0   )] + div[idx(gw, 1  )]);
+        div[idx(0,    gh+1)] = 0.5 * (div[idx(1,  gh+1)] + div[idx(0,  gh )]);
+        div[idx(gw+1, gh+1)] = 0.5 * (div[idx(gw, gh+1)] + div[idx(gw, gh )]);
+
+        // -- pressure solve (Gauss-Seidel) --
+        for _ in 0..SIM_STEPS {
+            for y in 1..=gh {
+                for x in 1..=gw {
+                    p[idx(x, y)] = (div[idx(x, y)]
+                        + p[idx(x-1, y)] + p[idx(x+1, y)]
+                        + p[idx(x, y-1)] + p[idx(x, y+1)]
                     ) / 4.0;
                 }
             }
-            Self::set_bnd(0, &mut self.v_prev);
+
+            // pressure boundary (b=0)
+            for y in 1..=gh {
+                p[idx(0,    y)] = p[idx(1,  y)];
+                p[idx(gw+1, y)] = p[idx(gw, y)];
+            }
+            for x in 1..=gw {
+                p[idx(x, 0   )] = p[idx(x, 1 )];
+                p[idx(x, gh+1)] = p[idx(x, gh)];
+            }
+
+            p[idx(0,    0   )] = 0.5 * (p[idx(1,  0   )] + p[idx(0,  1  )]);
+            p[idx(gw+1, 0   )] = 0.5 * (p[idx(gw, 0   )] + p[idx(gw, 1  )]);
+            p[idx(0,    gh+1)] = 0.5 * (p[idx(1,  gh+1)] + p[idx(0,  gh )]);
+            p[idx(gw+1, gh+1)] = 0.5 * (p[idx(gw, gh+1)] + p[idx(gw, gh )]);
         }
 
-        // subtract pressure gradient
-        for y in 1..=GRID_HEIGHT {
-            for x in 1..=GRID_WIDTH {
-                self.u[idx!(x, y)] -= 0.5 * (self.v_prev[idx!(x+1, y  )] - self.v_prev[idx!(x-1, y  )]) / h_x;
-                self.v[idx!(x, y)] -= 0.5 * (self.v_prev[idx!(x,   y+1)] - self.v_prev[idx!(x,   y-1)]) / h_y;
+        // -- subtract pressure gradient --
+        for y in 1..=gh {
+            for x in 1..=gw {
+                let u_new = dec_vel(self.u[idx(x, y)])
+                    - 0.5 * (p[idx(x+1, y)] - p[idx(x-1, y)]) / h_x;
+                let v_new = dec_vel(self.v[idx(x, y)])
+                    - 0.5 * (p[idx(x, y+1)] - p[idx(x, y-1)]) / h_y;
+                self.u[idx(x, y)] = enc_vel(u_new);
+                self.v[idx(x, y)] = enc_vel(v_new);
             }
         }
-        Self::set_bnd(1, &mut self.u);
-        Self::set_bnd(2, &mut self.v);
+
+        Self::set_bnd_vel(1, &mut self.u);
+        Self::set_bnd_vel(2, &mut self.v);
     }
 
     // ------------------------------------------------------------------ //
-    //  steps                                                               //
+    //  steps                                                        //
     // ------------------------------------------------------------------ //
 
-    pub fn dens_step(&mut self, diff: f32, dt: f32) {
-        // self.add_source(dt);
-        // self.swap_density();
-        // self.diffuse(diff, dt);
-        // self.swap_density();
-        // self.advect(dt);
-        // 1. Add sources to all channels
-        Self::add_source_field(&mut self.r, &self.r_prev, dt);
-        Self::add_source_field(&mut self.g, &self.g_prev, dt);
-        Self::add_source_field(&mut self.b, &self.b_prev, dt);
-
-        self.swap_density();
-        Self::diffuse_field(0, &mut self.r, &self.r_prev, diff, dt);
-        Self::diffuse_field(0, &mut self.g, &self.g_prev, diff, dt);
-        Self::diffuse_field(0, &mut self.b, &self.b_prev, diff, dt);
-
-        self.swap_density();
-        Self::advect_field(0, &mut self.r, &self.r_prev, &self.u, &self.v, dt);
-        Self::advect_field(0, &mut self.g, &self.g_prev, &self.u, &self.v, dt);
-        Self::advect_field(0, &mut self.b, &self.b_prev, &self.u, &self.v, dt);
-    }
+    // fn vel_step(&mut self, visc: f32, dt: f32) {
+    //     // Diffuse in-place (Gauss-Seidel, no prev needed)
+    //     Self::diffuse_vel(1, &mut self.u, visc, dt);
+    //     Self::diffuse_vel(2, &mut self.v, visc, dt);
+    //     self.project();
+    //     // Advect using a local f32 snapshot (see advect_vel comments)
+    //     let u_snap = self.u;
+    //     let v_snap = self.v;
+    //     Self::advect_vel(1, &mut self.u, &u_snap, &v_snap, dt);
+    //     Self::advect_vel(2, &mut self.v, &u_snap, &v_snap, dt);
+    //     self.project();
+    // }
+    //
+    // fn dens_step(&mut self, diff: f32, dt: f32) {
+    //     Self::diffuse_den(&mut self.r, diff, dt);
+    //     Self::diffuse_den(&mut self.g, diff, dt);
+    //     Self::diffuse_den(&mut self.b, diff, dt);
+    //
+    //     // Capture velocity snapshot once for all three advect passes
+    //     let u_snap = self.u;
+    //     let v_snap = self.v;
+    //     Self::advect_den(&mut self.r, &u_snap, &v_snap, dt);
+    //     Self::advect_den(&mut self.g, &u_snap, &v_snap, dt);
+    //     Self::advect_den(&mut self.b, &u_snap, &v_snap, dt);
+    // }
 
     pub fn vel_step(&mut self, visc: f32, dt: f32) {
-        self.add_source_uv(dt);
-        self.swap_u();
-        self.diffuse_u(visc, dt);
-        self.swap_v();
-        self.diffuse_v(visc, dt);
+        let u_snap = self.u;
+        let v_snap = self.v;
+        Self::advect_vel(1, &mut self.u, &u_snap, &v_snap, dt);
+        Self::advect_vel(2, &mut self.v, &u_snap, &v_snap, dt);
         self.project();
-        self.swap_u();
-        self.swap_v();
-        self.advect_u(dt);
-        self.advect_v(dt);
-        self.project();
+    }
+
+    pub fn dens_step(&mut self, diff: f32, dt: f32) {
+        let u_snap = self.u;
+        let v_snap = self.v;
+        Self::advect_den(&mut self.r, &u_snap, &v_snap, dt);
+        Self::advect_den(&mut self.g, &u_snap, &v_snap, dt);
+        Self::advect_den(&mut self.b, &u_snap, &v_snap, dt);
     }
 
     pub fn step(&mut self, visc: f32, diff: f32, dt: f32) {
@@ -300,27 +387,25 @@ impl Grid {
     }
 
     // ------------------------------------------------------------------ //
-    //  force injection (call before step())                               //
+    //  force injection                                                     //
     // ------------------------------------------------------------------ //
 
-    pub fn apply_circular_source(
+    pub fn apply_circular_force(
         &mut self,
         cx: f32,
         cy: f32,
         radius: f32,
         fx: f32,
         fy: f32,
-        dt: f32
+        dt: f32,
     ) {
         let r_outer_sq = radius * radius;
-        let r_inner_sq = (radius * 0.5) * (radius * 0.5); // Core is half the radius
-        let max_density = 0.025;
+        let r_inner_sq = (radius * 0.5) * (radius * 0.5);
 
-        // Iterate over a bounding box around the circle to save cycles
         let x_start = (cx - radius).max(1.0) as usize;
-        let x_end = (cx + radius).min(GRID_WIDTH as f32) as usize;
+        let x_end   = (cx + radius).min(GRID_WIDTH  as f32) as usize;
         let y_start = (cy - radius).max(1.0) as usize;
-        let y_end = (cy + radius).min(GRID_HEIGHT as f32) as usize;
+        let y_end   = (cy + radius).min(GRID_HEIGHT as f32) as usize;
 
         for y in y_start..=y_end {
             for x in x_start..=x_end {
@@ -329,30 +414,33 @@ impl Grid {
                 let dist_sq = dx * dx + dy * dy;
 
                 if dist_sq <= r_outer_sq {
-                    let i = idx!(x, y);
-
+                    let i = idx(x, y);
                     let falloff = if dist_sq <= r_inner_sq {
                         1.0
                     } else {
                         (r_outer_sq - dist_sq) / (r_outer_sq - r_inner_sq)
                     };
 
-                    self.r_prev[i] = max_density * falloff;
-                    self.g_prev[i] = max_density * falloff;
-                    self.b_prev[i] = max_density * falloff;
-
-                    self.u[i] += fx * falloff * dt;
-                    self.v[i] += fy * falloff * dt;
+                    let u_new = dec_vel(self.u[i]) + fx * falloff * dt;
+                    let v_new = dec_vel(self.v[i]) + fy * falloff * dt;
+                    self.u[i] = enc_vel(u_new);
+                    self.v[i] = enc_vel(v_new);
                 }
             }
         }
     }
 
-    pub fn clear_sources(&mut self) {
-        self.u_prev = [0.0; GRID_WITH_BOUNDARY_SIZE];
-        self.v_prev = [0.0; GRID_WITH_BOUNDARY_SIZE];
-        self.r_prev = [0.0; GRID_WITH_BOUNDARY_SIZE];
-        self.g_prev = [0.0; GRID_WITH_BOUNDARY_SIZE];
-        self.b_prev = [0.0; GRID_WITH_BOUNDARY_SIZE];
+    // ------------------------------------------------------------------ //
+    //  rendering helpers                                                   //
+    // ------------------------------------------------------------------ //
+
+    /// Read a density cell as (r, g, b) as a u16
+    #[inline]
+    pub fn get_rgb(&self, x: usize, y: usize) -> (u16, u16, u16) {
+        (
+            self.r[idx(x, y)],
+            self.g[idx(x, y)],
+            self.b[idx(x, y)],
+        )
     }
 }
