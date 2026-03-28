@@ -1,4 +1,5 @@
 use crate::nadk::display::Color565;
+use crate::rgb::Rgb;
 
 // Possible values: 320x240, 160x120, 80x60, 64x48, 40x30
 pub const GRID_WIDTH:  i32 = 40;
@@ -22,8 +23,6 @@ const DYE_DECAY: f32 = 0.999;
 const DIFF_ITER: usize = 4;   // iterations for both diffuse solves
 const DYE_DIFF: f32    = 0.0001;
 const VEL_VISC: f32    = 0.0001; // near-zero for low viscosity
-
-const AVG_MASK: u32 = !(1 << 9 | 1 << 19 | 1 << 29); // 0xDFEFFBFF
 
 // Maximum representable velocity magnitude.
 // smaller = more precision.
@@ -55,35 +54,18 @@ fn dec_vel(raw: u16) -> f32 {
     (raw as f32 - 32768.0) / 32767.0 * VEL_MAX
 }
 
-#[inline(always)]
-fn enc_rgb(r: f32, g: f32, b: f32) -> u32 {
-    let r10 = (r.clamp(0.0, 1.0) * 1023.0 + 0.5) as u32;
-    let g10 = (g.clamp(0.0, 1.0) * 1023.0 + 0.5) as u32;
-    let b10 = (b.clamp(0.0, 1.0) * 1023.0 + 0.5) as u32;
-    r10 | (g10 << 10) | (b10 << 20)
-}
-
-#[inline(always)]
-fn dec_r(rgb: u32) -> f32 { (rgb & 0x3FF) as f32 / 1023.0 }
-
-#[inline(always)]
-fn dec_g(rgb: u32) -> f32 { ((rgb >> 10) & 0x3FF) as f32 / 1023.0 }
-
-#[inline(always)]
-fn dec_b(rgb: u32) -> f32 { ((rgb >> 20) & 0x3FF) as f32 / 1023.0 }
-
 // ------------------------------------------------------------------ //
 //  Grid                                                                //
 // ------------------------------------------------------------------ //
 
 pub struct Grid {
-    /// Velocity X — fixed-point, signed, bias 0x8000
+    /// Velocity X - fixed-point, signed, bias 0x8000
     pub u: [u16; GRID_WITH_BOUNDARY_SIZE],
-    /// Velocity Y — fixed-point, signed, bias 0x8000
+    /// Velocity Y - fixed-point, signed, bias 0x8000
     pub v: [u16; GRID_WITH_BOUNDARY_SIZE],
 
-    /// Dye channels — fixed-point, unsigned
-    pub rgb: [u32; GRID_WITH_BOUNDARY_SIZE],
+    /// Dye channels - 10 bit channels with 1 bit padding
+    pub rgb: [Rgb; GRID_WITH_BOUNDARY_SIZE],
 }
 
 // Zero velocity encodes as 0x8000 (midpoint), zero density as 0x0000.
@@ -94,7 +76,7 @@ impl Grid {
         Self {
             u: [ZERO_VEL; GRID_WITH_BOUNDARY_SIZE],
             v: [ZERO_VEL; GRID_WITH_BOUNDARY_SIZE],
-            rgb: [0; GRID_WITH_BOUNDARY_SIZE],
+            rgb: [Rgb::ZERO; GRID_WITH_BOUNDARY_SIZE],
         }
     }
 
@@ -124,10 +106,10 @@ impl Grid {
         field[idx(gw+1, gh+1)] = enc_vel(0.5 * (dec_vel(field[idx(gw, gh+1)]) + dec_vel(field[idx(gw, gh)])));
     }
 
-    fn set_bnd_rgb(field: &mut [u32; GRID_WITH_BOUNDARY_SIZE]) {
+    fn set_bnd_rgb(field: &mut [Rgb; GRID_WITH_BOUNDARY_SIZE]) {
         let gw = GRID_WIDTH  as usize;
         let gh = GRID_HEIGHT as usize;
-        // left and right walls — density copies neighbour (b=0)
+        // left and right walls - density copies neighbour (b=0)
         for y in 1..=gh {
             field[idx(0,    y)] = field[idx(1,  y)];
             field[idx(gw+1, y)] = field[idx(gw, y)];
@@ -137,22 +119,18 @@ impl Grid {
             field[idx(x, 0   )] = field[idx(x, 1 )];
             field[idx(x, gh+1)] = field[idx(x, gh)];
         }
-        // corners — integer average per packed channel
-        // safe because channels are in [0, 1023] so sum fits in u32
-        let avg = |a: u32, b: u32| -> u32 {
-            ((a >> 1) & AVG_MASK) + ((b >> 1) & AVG_MASK)
-        };
-        field[idx(0,    0   )] = avg(field[idx(1,  0   )], field[idx(0,  1  )]);
-        field[idx(gw+1, 0   )] = avg(field[idx(gw, 0   )], field[idx(gw, 1  )]);
-        field[idx(0,    gh+1)] = avg(field[idx(1,  gh+1)], field[idx(0,  gh )]);
-        field[idx(gw+1, gh+1)] = avg(field[idx(gw, gh+1)], field[idx(gw, gh )]);
+        // corners - integer average per packed channel
+        field[idx(0,    0   )] = field[idx(1,  0   )].avg(field[idx(0,  1  )]);
+        field[idx(gw+1, 0   )] = field[idx(gw, 0   )].avg(field[idx(gw, 1  )]);
+        field[idx(0,    gh+1)] = field[idx(1,  gh+1)].avg(field[idx(0,  gh )]);
+        field[idx(gw+1, gh+1)] = field[idx(gw, gh+1)].avg(field[idx(gw, gh )]);
     }
 
     // ------------------------------------------------------------------ //
     //  diffuse                                                           //
     // ------------------------------------------------------------------ //
 
-    fn diffuse_rgb(rgb: &mut [u32; GRID_WITH_BOUNDARY_SIZE], dt: f32) {
+    fn diffuse_rgb(rgb: &mut [Rgb; GRID_WITH_BOUNDARY_SIZE], dt: f32) {
         let gw = GRID_WIDTH  as usize;
         let gh = GRID_HEIGHT as usize;
         let a   = dt * DYE_DIFF * (GRID_WIDTH as f32).max(GRID_HEIGHT as f32);
@@ -167,9 +145,9 @@ impl Grid {
         let mut gf0 = [0.0f32; GRID_WITH_BOUNDARY_SIZE];
         let mut bf0 = [0.0f32; GRID_WITH_BOUNDARY_SIZE];
         for i in 0..GRID_WITH_BOUNDARY_SIZE {
-            let r = dec_r(rgb[i]);
-            let g = dec_g(rgb[i]);
-            let b = dec_b(rgb[i]);
+            let r = rgb[i].r();
+            let g = rgb[i].g();
+            let b = rgb[i].b();
             rf[i] = r; rf0[i] = r;
             gf[i] = g; gf0[i] = g;
             bf[i] = b; bf0[i] = b;
@@ -219,7 +197,7 @@ impl Grid {
 
         // encode
         for i in 0..GRID_WITH_BOUNDARY_SIZE {
-            rgb[i] = enc_rgb(rf[i], gf[i], bf[i]);
+            rgb[i] = Rgb::new(rf[i], gf[i], bf[i]);
         }
     }
 
@@ -314,7 +292,7 @@ impl Grid {
     }
 
     fn advect_rgb(
-        rgb: &mut [u32; GRID_WITH_BOUNDARY_SIZE],
+        rgb: &mut [Rgb; GRID_WITH_BOUNDARY_SIZE],
         u:   &[u16; GRID_WITH_BOUNDARY_SIZE],
         v:   &[u16; GRID_WITH_BOUNDARY_SIZE],
         dt:  f32,
@@ -333,9 +311,9 @@ impl Grid {
         for i in 0..GRID_WITH_BOUNDARY_SIZE {
             uf[i] = dec_vel(u[i]);
             vf[i] = dec_vel(v[i]);
-            rf[i] = dec_r(rgb[i]);
-            gf[i] = dec_g(rgb[i]);
-            bf[i] = dec_b(rgb[i]);
+            rf[i] = rgb[i].r();
+            gf[i] = rgb[i].g();
+            bf[i] = rgb[i].b();
         }
 
         for y in 1..=gh {
@@ -363,7 +341,7 @@ impl Grid {
                 let g = (w00*gf[i00] + w01*gf[i01] + w10*gf[i10] + w11*gf[i11]) * DYE_DECAY;
                 let b = (w00*bf[i00] + w01*bf[i01] + w10*bf[i10] + w11*bf[i11]) * DYE_DECAY;
 
-                rgb[i] = enc_rgb(r, g, b);
+                rgb[i] = Rgb::new(r, g, b);
             }
         }
 
@@ -468,7 +446,7 @@ impl Grid {
     // ------------------------------------------------------------------ //
 
     pub fn vel_step(&mut self, dt: f32) {
-        // Skip vel diffuse entirely if viscosity is zero — saves the stack alloc
+        // Skip vel diffuse entirely if viscosity is zero - saves the stack alloc
         if VEL_VISC > 0.0 {
             Self::diffuse_vel(1, &mut self.u, dt);
             Self::diffuse_vel(2, &mut self.v, dt);
@@ -559,16 +537,16 @@ impl Grid {
 
                     // Decode current packed value
                     let cur = self.rgb[i];
-                    let cr = dec_r(cur);
-                    let cg = dec_g(cur);
-                    let cb = dec_b(cur);
+                    let cr = cur.r();
+                    let cg = cur.g();
+                    let cb = cur.b();
 
                     // Saturating add per channel
                     let nr = (cr + base * r).clamp(0.0, 1.0);
                     let ng = (cg + base * g).clamp(0.0, 1.0);
                     let nb = (cb + base * b).clamp(0.0, 1.0);
 
-                    self.rgb[i] = enc_rgb(nr, ng, nb);
+                    self.rgb[i] = Rgb::new(nr, ng, nb);
                 }
             }
         }
@@ -576,10 +554,6 @@ impl Grid {
 
     #[inline(always)]
     pub fn get_color(&self, idx: usize) -> Color565 {
-        let rgb = self.rgb[idx];
-        let r = ((rgb & 0x3FF) >> 2) as u16;
-        let g = (((rgb >> 10) & 0x3FF) >> 2) as u16;
-        let b = (((rgb >> 20) & 0x3FF) >> 2) as u16;
-        Color565::from_rgb888(r, g, b)
+        self.rgb[idx].to_color565()
     }
 }

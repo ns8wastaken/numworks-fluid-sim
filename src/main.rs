@@ -3,6 +3,7 @@
 
 #[macro_use]
 mod nadk;
+mod rgb;
 mod grid;
 
 use nadk::display::{Color565, push_rect};
