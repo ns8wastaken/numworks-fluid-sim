@@ -17,14 +17,6 @@ use crate::nadk::time::get_current_time_seconds;
 const SCALE_X: i32 = 320 / grid::GRID_WIDTH;
 const SCALE_Y: i32 = 240 / grid::GRID_HEIGHT;
 
-const CIRCLE_CX: f32       = grid::GRID_WIDTH as f32 / 2.0;
-const CIRCLE_CY: f32       = grid::GRID_HEIGHT as f32 / 2.0;
-const CIRCLE_R_OUTER: f32  = 5.0;
-const CIRCLE_R_INNER: f32  = 2.5; // fade start
-const CIRCLE_OUTER_SQ: f32 = CIRCLE_R_OUTER * CIRCLE_R_OUTER;
-const CIRCLE_INNER_SQ: f32 = CIRCLE_R_INNER * CIRCLE_R_INNER;
-const CIRCLE_MAX_DENS: f32 = 0.05;
-
 const POWER_MULT: f32 = 0.025;
 
 const FLUID_COLORS: [Color565; 10] = [
@@ -48,42 +40,6 @@ pub fn fast_sqrt(x: f32) -> f32 {
     let y = f32::from_bits(i);
     let y = y * (1.5 - 0.5 * x * y * y);
     y * x // 1/sqrt(x) * x = sqrt(x)
-}
-
-fn density_to_color(r: u16, g: u16, b: u16) -> Color565 {
-    // 16-bit -> 8-bit
-    let r_u16 = r >> 8;
-    let g_u16 = g >> 8;
-    let b_u16 = b >> 8;
-    Color565::from_rgb888(r_u16, g_u16, b_u16)
-}
-
-fn spawn_dye(grid: &mut Grid, r: f32, g: f32, b: f32) {
-    for y in 1..=grid::GRID_HEIGHT as i32 {
-        for x in 1..=grid::GRID_WIDTH as i32 {
-            let dx = x as f32 - CIRCLE_CX;
-            let dy = y as f32 - CIRCLE_CY;
-            let dist_sq = dx * dx + dy * dy;
-            if dist_sq <= CIRCLE_OUTER_SQ {
-                let i = grid::idx(x as usize, y as usize);
-
-                let falloff = if dist_sq <= CIRCLE_INNER_SQ {
-                    1.0
-                } else {
-                    (CIRCLE_OUTER_SQ - dist_sq) / (CIRCLE_OUTER_SQ - CIRCLE_INNER_SQ)
-                };
-
-                let base = falloff * CIRCLE_MAX_DENS;  // in [0, 1]
-                let add_r = (base * r * 65535.0 + 0.5) as u16;
-                let add_g = (base * g * 65535.0 + 0.5) as u16;
-                let add_b = (base * b * 65535.0 + 0.5) as u16;
-
-                grid.r[i] = grid.r[i].saturating_add(add_r);
-                grid.g[i] = grid.g[i].saturating_add(add_g);
-                grid.b[i] = grid.b[i].saturating_add(add_b);
-            }
-        }
-    }
 }
 
 setup_allocator!();
@@ -139,7 +95,7 @@ fn main() {
             let g = curr_color.1 as f32 / 63.0;
             let b = curr_color.2 as f32 / 31.0;
 
-            spawn_dye(&mut grid, r, g, b);
+            grid.spawn_dye(r, g, b);
         }
 
         let mut fx = 0.0;
@@ -162,7 +118,6 @@ fn main() {
             grid.apply_circular_force(
                 grid::GRID_WIDTH as f32 / 2.0,
                 grid::GRID_HEIGHT as f32 / 2.0,
-                CIRCLE_R_OUTER,
                 fx,
                 fy,
                 dt
@@ -174,8 +129,7 @@ fn main() {
         // Render density into cell_buffer
         for gy in 0..grid::GRID_HEIGHT {
             for gx in 0..grid::GRID_WIDTH {
-                let (r, g, b) = grid.get_rgb(gx as usize, gy as usize);
-                let color = density_to_color(r, g, b);
+                let color = grid.get_color(grid::idx(gx as usize, gy as usize));
 
                 for i in 0..(SCALE_X * SCALE_Y) as usize {
                     cell_buffer[i] = color;
