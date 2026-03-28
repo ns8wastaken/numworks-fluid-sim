@@ -1,6 +1,6 @@
 // Possible values: 320x240, 160x120, 80x60, 64x48
-pub const GRID_WIDTH:  i32 = 64;
-pub const GRID_HEIGHT: i32 = 48;
+pub const GRID_WIDTH:  i32 = 80;
+pub const GRID_HEIGHT: i32 = 60;
 pub const GRID_WIDTH_WITH_BOUNDARY:  usize = GRID_WIDTH  as usize + 2;
 pub const GRID_HEIGHT_WITH_BOUNDARY: usize = GRID_HEIGHT as usize + 2;
 pub const GRID_WITH_BOUNDARY_SIZE:   usize = GRID_WIDTH_WITH_BOUNDARY
@@ -124,54 +124,6 @@ impl Grid {
         field[idx(gw+1, 0   )] = ((field[idx(gw, 0   )] as u32 + field[idx(gw, 1  )] as u32) / 2) as u16;
         field[idx(0,    gh+1)] = ((field[idx(1,  gh+1)] as u32 + field[idx(0,  gh )] as u32) / 2) as u16;
         field[idx(gw+1, gh+1)] = ((field[idx(gw, gh+1)] as u32 + field[idx(gw, gh )] as u32) / 2) as u16;
-    }
-
-    // ------------------------------------------------------------------ //
-    //  diffuse (in-place Gauss-Seidel)                                   //
-    // ------------------------------------------------------------------ //
-
-    fn diffuse_vel(
-        b: i32,
-        field: &mut [u16; GRID_WITH_BOUNDARY_SIZE],
-        diff: f32, dt: f32
-    ) {
-        let a = dt * diff * (GRID_WIDTH as f32).max(GRID_HEIGHT as f32);
-        let inv = 1.0 / (1.0 + 4.0 * a);
-        for _ in 0..SIM_STEPS {
-            for y in 1..=GRID_HEIGHT as usize {
-                for x in 1..=GRID_WIDTH as usize {
-                    let center    = dec_vel(field[idx(x, y)]);
-                    let neighbors = dec_vel(field[idx(x-1, y)])
-                                  + dec_vel(field[idx(x+1, y)])
-                                  + dec_vel(field[idx(x, y-1)])
-                                  + dec_vel(field[idx(x, y+1)]);
-                    // center is the "prev" value here (Gauss-Seidel in-place)
-                    field[idx(x, y)] = enc_vel((center + a * neighbors) * inv);
-                }
-            }
-            Self::set_bnd_vel(b, field);
-        }
-    }
-
-    fn diffuse_den(
-        field: &mut [u16; GRID_WITH_BOUNDARY_SIZE],
-        diff: f32, dt: f32
-    ) {
-        let a = dt * diff * (GRID_WIDTH as f32).max(GRID_HEIGHT as f32);
-        let inv = 1.0 / (1.0 + 4.0 * a);
-        for _ in 0..SIM_STEPS {
-            for y in 1..=GRID_HEIGHT as usize {
-                for x in 1..=GRID_WIDTH as usize {
-                    let center    = dec_den(field[idx(x, y)]);
-                    let neighbors = dec_den(field[idx(x-1, y)])
-                                  + dec_den(field[idx(x+1, y)])
-                                  + dec_den(field[idx(x, y-1)])
-                                  + dec_den(field[idx(x, y+1)]);
-                    field[idx(x, y)] = enc_den((center + a * neighbors) * inv);
-                }
-            }
-            Self::set_bnd_den(field);
-        }
     }
 
     // ------------------------------------------------------------------ //
@@ -339,33 +291,7 @@ impl Grid {
     //  steps                                                        //
     // ------------------------------------------------------------------ //
 
-    // fn vel_step(&mut self, visc: f32, dt: f32) {
-    //     // Diffuse in-place (Gauss-Seidel, no prev needed)
-    //     Self::diffuse_vel(1, &mut self.u, visc, dt);
-    //     Self::diffuse_vel(2, &mut self.v, visc, dt);
-    //     self.project();
-    //     // Advect using a local f32 snapshot (see advect_vel comments)
-    //     let u_snap = self.u;
-    //     let v_snap = self.v;
-    //     Self::advect_vel(1, &mut self.u, &u_snap, &v_snap, dt);
-    //     Self::advect_vel(2, &mut self.v, &u_snap, &v_snap, dt);
-    //     self.project();
-    // }
-    //
-    // fn dens_step(&mut self, diff: f32, dt: f32) {
-    //     Self::diffuse_den(&mut self.r, diff, dt);
-    //     Self::diffuse_den(&mut self.g, diff, dt);
-    //     Self::diffuse_den(&mut self.b, diff, dt);
-    //
-    //     // Capture velocity snapshot once for all three advect passes
-    //     let u_snap = self.u;
-    //     let v_snap = self.v;
-    //     Self::advect_den(&mut self.r, &u_snap, &v_snap, dt);
-    //     Self::advect_den(&mut self.g, &u_snap, &v_snap, dt);
-    //     Self::advect_den(&mut self.b, &u_snap, &v_snap, dt);
-    // }
-
-    pub fn vel_step(&mut self, visc: f32, dt: f32) {
+    pub fn vel_step(&mut self, dt: f32) {
         let u_snap = self.u;
         let v_snap = self.v;
         Self::advect_vel(1, &mut self.u, &u_snap, &v_snap, dt);
@@ -373,7 +299,7 @@ impl Grid {
         self.project();
     }
 
-    pub fn dens_step(&mut self, diff: f32, dt: f32) {
+    pub fn dens_step(&mut self, dt: f32) {
         let u_snap = self.u;
         let v_snap = self.v;
         Self::advect_den(&mut self.r, &u_snap, &v_snap, dt);
@@ -381,9 +307,9 @@ impl Grid {
         Self::advect_den(&mut self.b, &u_snap, &v_snap, dt);
     }
 
-    pub fn step(&mut self, visc: f32, diff: f32, dt: f32) {
-        self.vel_step(visc, dt);
-        self.dens_step(diff, dt);
+    pub fn step(&mut self, dt: f32) {
+        self.vel_step(dt);
+        self.dens_step(dt);
     }
 
     // ------------------------------------------------------------------ //

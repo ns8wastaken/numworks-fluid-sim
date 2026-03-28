@@ -25,9 +25,6 @@ const CIRCLE_OUTER_SQ: f32 = CIRCLE_R_OUTER * CIRCLE_R_OUTER;
 const CIRCLE_INNER_SQ: f32 = CIRCLE_R_INNER * CIRCLE_R_INNER;
 const CIRCLE_MAX_DENS: f32 = 0.05;
 
-const VISCOSITY: f32 = 0.0000;
-const DIFFUSION: f32 = 0.0001;
-
 const POWER_MULT: f32 = 0.025;
 
 const FLUID_COLORS: [Color565; 10] = [
@@ -172,7 +169,7 @@ fn main() {
             );
         }
 
-        grid.step(VISCOSITY, DIFFUSION, dt);
+        grid.step(dt);
 
         // Render density into cell_buffer
         for gy in 0..grid::GRID_HEIGHT {
