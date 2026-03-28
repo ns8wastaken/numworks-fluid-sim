@@ -3,7 +3,7 @@ calc_use!(alloc::string::String);
 calc_use!(alloc::vec::Vec);
 
 /// Wait until Ok is released.
-/// This function should be added at the beginning of the program because your it could handle the "Ok" that started the app. 
+/// This function should be added at the beginning of the program because it could handle the "Ok" that started the app.
 pub fn wait_ok_released() {
     while keyboard::KeyboardState::scan().key_down(keyboard::Key::Ok) {
         time::wait_milliseconds(50);

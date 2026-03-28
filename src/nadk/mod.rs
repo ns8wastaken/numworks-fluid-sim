@@ -15,7 +15,7 @@ pub mod time;
 /// Generates random numbers with the built-in random generator of the OS. Also provide some higher level functions.
 pub mod random;
 
-/// Provides abstraction to the keyboard. Also contains a high level input manager for game engines. 
+/// Provides abstraction to the keyboard. Also contains a high level input manager for game engines.
 pub mod keyboard;
 
 /// A crate to handle the program's panics.

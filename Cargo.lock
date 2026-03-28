@@ -3,16 +3,6 @@
 version = 4
 
 [[package]]
-name = "Rust-epsilon-dev-template"
-version = "0.1.0"
-dependencies = [
- "cc",
- "cortex-m",
- "embedded-alloc",
- "enum-iterator",
-]
-
-[[package]]
 name = "bare-metal"
 version = "0.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -148,6 +138,16 @@ name = "nb"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8d5439c4ad607c3c23abf66de8c8bf57ba8adcd1f129e699851a6e43935d339d"
+
+[[package]]
+name = "numworks-fluid-sim"
+version = "0.1.0"
+dependencies = [
+ "cc",
+ "cortex-m",
+ "embedded-alloc",
+ "enum-iterator",
+]
 
 [[package]]
 name = "proc-macro2"
