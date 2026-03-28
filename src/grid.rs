@@ -1,8 +1,8 @@
 // Possible values: 320x240, 160x120, 80x60, 64x48
-pub const GRID_WIDTH: usize                = 160;
-pub const GRID_HEIGHT: usize               = 120;
-pub const GRID_WIDTH_WITH_BOUNDARY: usize  = GRID_WIDTH + 2;
-pub const GRID_HEIGHT_WITH_BOUNDARY: usize = GRID_HEIGHT + 2;
+pub const GRID_WIDTH: i32                  = 80;
+pub const GRID_HEIGHT: i32                 = 60;
+pub const GRID_WIDTH_WITH_BOUNDARY: usize  = GRID_WIDTH as usize + 2;
+pub const GRID_HEIGHT_WITH_BOUNDARY: usize = GRID_HEIGHT as usize + 2;
 pub const GRID_WITH_BOUNDARY_SIZE: usize   = GRID_WIDTH_WITH_BOUNDARY * GRID_HEIGHT_WITH_BOUNDARY;
 
 macro_rules! idx {
@@ -24,10 +24,10 @@ pub const fn idx(x: usize, y: usize) -> usize {
  */
 
 pub struct Grid {
-    pub u:            [f32; GRID_WITH_BOUNDARY_SIZE],
-    pub v:            [f32; GRID_WITH_BOUNDARY_SIZE],
-    pub u_prev:       [f32; GRID_WITH_BOUNDARY_SIZE],
-    pub v_prev:       [f32; GRID_WITH_BOUNDARY_SIZE],
+    pub u:      [f32; GRID_WITH_BOUNDARY_SIZE],
+    pub v:      [f32; GRID_WITH_BOUNDARY_SIZE],
+    pub u_prev: [f32; GRID_WITH_BOUNDARY_SIZE],
+    pub v_prev: [f32; GRID_WITH_BOUNDARY_SIZE],
 
     // Dye Channels
     pub r:       [f32; GRID_WITH_BOUNDARY_SIZE],
@@ -60,20 +60,20 @@ impl Grid {
 
     fn set_bnd(b: i32, field: &mut [f32; GRID_WITH_BOUNDARY_SIZE]) {
         // left and right walls
-        for y in 1..=GRID_HEIGHT as i32 {
-            field[idx!(0,                     y)] = if b == 1 { -field[idx!(1,            y)] } else { field[idx!(1,            y)] };
-            field[idx!(GRID_WIDTH as i32 + 1, y)] = if b == 1 { -field[idx!(GRID_WIDTH,   y)] } else { field[idx!(GRID_WIDTH,   y)] };
+        for y in 1..=GRID_HEIGHT {
+            field[idx!(0,              y)] = if b == 1 { -field[idx!(1,          y)] } else { field[idx!(1,          y)] };
+            field[idx!(GRID_WIDTH + 1, y)] = if b == 1 { -field[idx!(GRID_WIDTH, y)] } else { field[idx!(GRID_WIDTH, y)] };
         }
         // top and bottom walls
-        for x in 1..=GRID_WIDTH as i32 {
-            field[idx!(x,  0                     )] = if b == 2 { -field[idx!(x,  1          )] } else { field[idx!(x,  1          )] };
-            field[idx!(x,  GRID_HEIGHT as i32 + 1)] = if b == 2 { -field[idx!(x,  GRID_HEIGHT)] } else { field[idx!(x,  GRID_HEIGHT)] };
+        for x in 1..=GRID_WIDTH {
+            field[idx!(x,  0              )] = if b == 2 { -field[idx!(x,  1          )] } else { field[idx!(x,  1)] };
+            field[idx!(x,  GRID_HEIGHT + 1)] = if b == 2 { -field[idx!(x,  GRID_HEIGHT)] } else { field[idx!(x,  GRID_HEIGHT)] };
         }
         // corners — average of the two neighbours
-        field[idx!(0,                     0                   )] = 0.5 * (field[idx!(1,                 0                   )] + field[idx!(0,                 1                 )]);
-        field[idx!(GRID_WIDTH as i32 + 1, 0                   )] = 0.5 * (field[idx!(GRID_WIDTH as i32, 0                   )] + field[idx!(GRID_WIDTH as i32, 1                 )]);
-        field[idx!(0,                     GRID_HEIGHT as i32+1)] = 0.5 * (field[idx!(1,                 GRID_HEIGHT as i32+1)] + field[idx!(0,                 GRID_HEIGHT as i32)]);
-        field[idx!(GRID_WIDTH as i32 + 1, GRID_HEIGHT as i32+1)] = 0.5 * (field[idx!(GRID_WIDTH as i32, GRID_HEIGHT as i32+1)] + field[idx!(GRID_WIDTH as i32, GRID_HEIGHT as i32)]);
+        field[idx!(0,              0            )] = 0.5 * (field[idx!(1,          0            )] + field[idx!(0,          1)]);
+        field[idx!(GRID_WIDTH + 1, 0            )] = 0.5 * (field[idx!(GRID_WIDTH, 0            )] + field[idx!(GRID_WIDTH, 1)]);
+        field[idx!(0,              GRID_HEIGHT+1)] = 0.5 * (field[idx!(1,          GRID_HEIGHT+1)] + field[idx!(0,          GRID_HEIGHT)]);
+        field[idx!(GRID_WIDTH + 1, GRID_HEIGHT+1)] = 0.5 * (field[idx!(GRID_WIDTH, GRID_HEIGHT+1)] + field[idx!(GRID_WIDTH, GRID_HEIGHT)]);
     }
 
     // ------------------------------------------------------------------ //
@@ -128,8 +128,8 @@ impl Grid {
     ) {
         let a = dt * diff * (GRID_WIDTH as f32).max(GRID_HEIGHT as f32);
         for _ in 0..20 {
-            for y in 1..=GRID_HEIGHT as i32 {
-                for x in 1..=GRID_WIDTH as i32 {
+            for y in 1..=GRID_HEIGHT {
+                for x in 1..=GRID_WIDTH {
                     let neighbors = field[idx!(x-1, y)]
                                   + field[idx!(x+1, y)]
                                   + field[idx!(x, y-1)]
@@ -169,8 +169,8 @@ impl Grid {
         let dt0_x = dt * GRID_WIDTH as f32;
         let dt0_y = dt * GRID_HEIGHT as f32;
 
-        for y in 1..=GRID_HEIGHT as i32 {
-            for x in 1..=GRID_WIDTH as i32 {
+        for y in 1..=GRID_HEIGHT {
+            for x in 1..=GRID_WIDTH {
                 let mut px = x as f32 - dt0_x * u[idx!(x, y)];
                 let mut py = y as f32 - dt0_y * v[idx!(x, y)];
 
@@ -215,8 +215,8 @@ impl Grid {
         let h_y = 1.0 / GRID_HEIGHT as f32;
 
         // compute divergence into u_prev, zero pressure into v_prev
-        for y in 1..=GRID_HEIGHT as i32 {
-            for x in 1..=GRID_WIDTH as i32 {
+        for y in 1..=GRID_HEIGHT {
+            for x in 1..=GRID_WIDTH {
                 self.u_prev[idx!(x, y)] = -0.5 * (
                     h_x * (self.u[idx!(x+1, y)] - self.u[idx!(x-1, y)]) +
                     h_y * (self.v[idx!(x, y+1)] - self.v[idx!(x, y-1)])
@@ -229,8 +229,8 @@ impl Grid {
 
         // Gauss-Seidel pressure solve
         for _ in 0..20 {
-            for y in 1..=GRID_HEIGHT as i32 {
-                for x in 1..=GRID_WIDTH as i32 {
+            for y in 1..=GRID_HEIGHT {
+                for x in 1..=GRID_WIDTH {
                     self.v_prev[idx!(x, y)] = (
                           self.u_prev[idx!(x,   y  )]
                         + self.v_prev[idx!(x-1, y  )]
@@ -244,8 +244,8 @@ impl Grid {
         }
 
         // subtract pressure gradient
-        for y in 1..=GRID_HEIGHT as i32 {
-            for x in 1..=GRID_WIDTH as i32 {
+        for y in 1..=GRID_HEIGHT {
+            for x in 1..=GRID_WIDTH {
                 self.u[idx!(x, y)] -= 0.5 * (self.v_prev[idx!(x+1, y  )] - self.v_prev[idx!(x-1, y  )]) / h_x;
                 self.v[idx!(x, y)] -= 0.5 * (self.v_prev[idx!(x,   y+1)] - self.v_prev[idx!(x,   y-1)]) / h_y;
             }

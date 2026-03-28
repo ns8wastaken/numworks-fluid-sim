@@ -5,24 +5,30 @@
 mod nadk;
 mod grid;
 
-use nadk::display::{Color565, SCREEN_RECT, push_rect};
+use nadk::display::{Color565, push_rect};
 use nadk::keyboard::Key;
 use nadk::utils::wait_ok_released;
 use grid::Grid;
 
+use crate::nadk::display::ScreenRect;
 use crate::nadk::keyboard::InputManager;
 use crate::nadk::time::get_current_time_seconds;
 
-const SCALE_X: usize = 320 / grid::GRID_WIDTH;
-const SCALE_Y: usize = 240 / grid::GRID_HEIGHT;
+const SCALE_X: i32 = 320 / grid::GRID_WIDTH;
+const SCALE_Y: i32 = 240 / grid::GRID_HEIGHT;
 
 const CIRCLE_CX: f32       = grid::GRID_WIDTH as f32 / 2.0;
 const CIRCLE_CY: f32       = grid::GRID_HEIGHT as f32 / 2.0;
-const CIRCLE_R_OUTER: f32  = 20.0;
-const CIRCLE_R_INNER: f32  = 10.0; // fade start
+const CIRCLE_R_OUTER: f32  = 10.0;
+const CIRCLE_R_INNER: f32  = 5.0; // fade start
 const CIRCLE_OUTER_SQ: f32 = CIRCLE_R_OUTER * CIRCLE_R_OUTER;
 const CIRCLE_INNER_SQ: f32 = CIRCLE_R_INNER * CIRCLE_R_INNER;
-const CIRCLE_MAX_DENS: f32 = 0.2;
+const CIRCLE_MAX_DENS: f32 = 0.1;
+
+const VISCOSITY: f32 = 0.0001;
+const DIFFUSION: f32 = 0.0001;
+
+const POWER_MULT: f32 = 0.05;
 
 const FLUID_COLORS: [Color565; 10] = [
     Color565::from_rgb888(0,   255, 255), // Electric Cyan
@@ -37,9 +43,7 @@ const FLUID_COLORS: [Color565; 10] = [
     Color565::from_rgb888(255, 255, 255), // Plasma White
 ];
 
-configure_app!(b"FluidSim\0", 10, "../target/icon.nwi", 745);
-
-setup_allocator!();
+configure_app!(b"FluidSim\0", 9, "../target/icon.nwi", 745);
 
 pub fn fast_sqrt(x: f32) -> f32 {
     let i = x.to_bits();
@@ -88,21 +92,21 @@ fn spawn_density(grid: &mut Grid, r: f32, g: f32, b: f32) {
     }
 }
 
+setup_allocator!();
+
 #[unsafe(no_mangle)]
 fn main() {
     init_heap!();
     wait_ok_released();
 
     let mut grid = Grid::new();
-    let mut framebuffer = [Color565::from_rgb888(0, 0, 0); 320 * 240];
-
-    let viscosity = 0.0001;
-    let diffusion = 0.0001;
-
-    let power_mult = 0.075;
+    let mut cell_buffer = [
+        Color565::from_rgb888(0, 0, 0);
+        SCALE_X as usize * SCALE_Y as usize
+    ];
 
     let mut current_color_idx = 0;
-    let mut constant_stream = false;
+    let mut constant_flow = false;
 
     let mut im = InputManager::new();
 
@@ -117,7 +121,7 @@ fn main() {
             grid = Grid::new();
         }
         if im.is_just_pressed(Key::Exe) {
-            constant_stream = !constant_stream;
+            constant_flow = !constant_flow;
         }
 
         // Switch colors
@@ -136,7 +140,7 @@ fn main() {
         grid.clear_sources();
 
         // Add density in the center
-        if im.is_keydown(Key::Back) || get_current_time_seconds() < 1.0 || constant_stream {
+        if im.is_keydown(Key::Back) || get_current_time_seconds() < 1.0 || constant_flow {
             let curr_color = FLUID_COLORS[current_color_idx]
                 .get_components();
 
@@ -160,8 +164,8 @@ fn main() {
             fx /= mag;
             fy /= mag;
         }
-        fx *= power_mult;
-        fy *= power_mult;
+        fx *= POWER_MULT;
+        fy *= POWER_MULT;
 
         if fx != 0.0 || fy != 0.0 {
             grid.apply_circular_source(
@@ -174,29 +178,31 @@ fn main() {
             );
         }
 
-        grid.step(viscosity, diffusion, dt);
+        grid.step(VISCOSITY, DIFFUSION, dt);
 
         // Render density into framebuffer
         for gy in 0..grid::GRID_HEIGHT {
             for gx in 0..grid::GRID_WIDTH {
-                let idx = grid::idx(gx + 1, gy + 1);
-                let r_val = grid.r[idx];
-                let g_val = grid.g[idx];
-                let b_val = grid.b[idx];
+                let idx = grid::idx(gx as usize + 1, gy as usize + 1);
 
-                let color = density_to_color(r_val, g_val, b_val);
+                // 1. Get the color for this grid cell
+                let color = density_to_color(grid.r[idx], grid.g[idx], grid.b[idx]);
 
-                // Fill SCALE_X × SCALE_Y block of screen pixels
-                for py in 0..SCALE_Y {
-                    let sy_offset = (gy * SCALE_Y + py) * 320;
-                    for px in 0..SCALE_X {
-                        let sx = gx * SCALE_X + px;
-                        framebuffer[sy_offset + sx] = color;
-                    }
+                // 2. Fill the tiny cell buffer
+                for i in 0..(SCALE_X * SCALE_Y) as usize {
+                    cell_buffer[i] = color;
                 }
+
+                // 3. Push only this small rectangle to the screen
+                let rect = ScreenRect {
+                    x: (gx * SCALE_X) as u16,
+                    y: (gy * SCALE_Y) as u16,
+                    width: SCALE_X as u16,
+                    height: SCALE_Y as u16,
+                };
+
+                push_rect(rect, &cell_buffer);
             }
         }
-
-        push_rect(SCREEN_RECT, &framebuffer);
     }
 }
