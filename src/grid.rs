@@ -21,8 +21,8 @@ const SIM_STEPS: usize = 10;
 const DYE_DECAY: f32 = 0.999;
 
 const DIFF_ITER: usize = 4;   // iterations for both diffuse solves
-const DYE_DIFF: f32    = 0.0001;
-const VEL_VISC: f32    = 0.0001; // near-zero for low viscosity
+const DYE_DIFF: f32 = 0.0001;
+const VEL_VISC: f32 = 0.0001; // near-zero for low viscosity
 
 // Maximum representable velocity magnitude.
 // smaller = more precision.

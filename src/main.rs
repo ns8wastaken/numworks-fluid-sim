@@ -6,12 +6,11 @@ mod nadk;
 mod rgb;
 mod grid;
 
-use nadk::display::{Color565, push_rect};
+use nadk::display::{Color565, ScreenRect, push_rect_uniform};
 use nadk::keyboard::Key;
 use nadk::utils::wait_ok_released;
 use grid::Grid;
 
-use crate::nadk::display::ScreenRect;
 use crate::nadk::keyboard::InputManager;
 use crate::nadk::time::get_current_time_seconds;
 
@@ -51,10 +50,6 @@ fn main() {
     wait_ok_released();
 
     let mut grid = Grid::new();
-    let mut cell_buffer = [
-        Color565::from_rgb888(0, 0, 0);
-        SCALE_X as usize * SCALE_Y as usize
-    ];
 
     let mut current_color_idx = 0;
     let mut constant_flow = false;
@@ -132,10 +127,6 @@ fn main() {
             for gx in 0..grid::GRID_WIDTH {
                 let color = grid.get_color(grid::idx(gx as usize, gy as usize));
 
-                for i in 0..(SCALE_X * SCALE_Y) as usize {
-                    cell_buffer[i] = color;
-                }
-
                 let rect = ScreenRect {
                     x: (gx * SCALE_X) as u16,
                     y: (gy * SCALE_Y) as u16,
@@ -143,7 +134,7 @@ fn main() {
                     height: SCALE_Y as u16,
                 };
 
-                push_rect(rect, &cell_buffer);
+                push_rect_uniform(rect, color);
             }
         }
     }
