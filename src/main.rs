@@ -33,7 +33,7 @@ const FLUID_COLORS: [Color565; 10] = [
     Color565::from_rgb888(255, 255, 255), // Plasma White
 ];
 
-configure_app!(b"FluidSim\0", 9, "../target/icon.nwi", 745);
+configure_app!(b"FluidSim\0", 9, "../target/icon.nwi", 3576);
 
 pub fn fast_sqrt(x: f32) -> f32 {
     let i = x.to_bits();
