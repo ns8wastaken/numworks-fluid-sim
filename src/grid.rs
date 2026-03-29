@@ -1,35 +1,37 @@
 use crate::nadk::display::Color565;
-use crate::rgb::Rgb;
+use crate::nadk::time::get_current_time_millis;
 
 // Possible values: 320x240, 160x120, 80x60, 64x48, 40x30
-pub const GRID_WIDTH:  i32 = 40;
+pub const GRID_WIDTH: i32  = 40;
 pub const GRID_HEIGHT: i32 = 30;
-pub const GRID_WIDTH_WITH_BOUNDARY:  usize = GRID_WIDTH  as usize + 2;
+pub const GRID_WIDTH_WITH_BOUNDARY: usize  = GRID_WIDTH  as usize + 2;
 pub const GRID_HEIGHT_WITH_BOUNDARY: usize = GRID_HEIGHT as usize + 2;
-pub const GRID_WITH_BOUNDARY_SIZE:   usize = GRID_WIDTH_WITH_BOUNDARY
+pub const GRID_WITH_BOUNDARY_SIZE: usize   = GRID_WIDTH_WITH_BOUNDARY
                                            * GRID_HEIGHT_WITH_BOUNDARY;
 
-pub const CIRCLE_CX: f32       = GRID_WIDTH as f32 / 2.0;
+pub const CIRCLE_CX: f32       = GRID_WIDTH  as f32 / 2.0;
 pub const CIRCLE_CY: f32       = GRID_HEIGHT as f32 / 2.0;
 pub const CIRCLE_R_OUTER: f32  = 5.0;
-pub const CIRCLE_R_INNER: f32  = 2.5; // fade start
+pub const CIRCLE_R_INNER: f32  = 2.5;
 pub const CIRCLE_OUTER_SQ: f32 = CIRCLE_R_OUTER * CIRCLE_R_OUTER;
 pub const CIRCLE_INNER_SQ: f32 = CIRCLE_R_INNER * CIRCLE_R_INNER;
 pub const CIRCLE_MAX_DENS: f32 = 0.05;
 
-const SIM_STEPS: usize = 10;
-const DYE_DECAY: f32 = 0.999;
+// Pressure solver iterations
+const SIM_STEPS: usize = 4;
 
-const DIFF_ITER: usize = 4;   // iterations for both diffuse solves
-const DYE_DIFF: f32 = 0.0001;
-const VEL_VISC: f32 = 0.0001; // near-zero for low viscosity
+// Dye diffusion is skipped entirely (visually indistinguishable at DYE_DIFF=0.0001)
+// Dye still spreads naturally through advection
+const DYE_DECAY: f32 = 0.998;
 
-// Maximum representable velocity magnitude.
-// smaller = more precision.
+const DIFF_ITER: usize = 4;
+const VEL_VISC:  f32   = 0.0001;
+
+// Maximum representable velocity magnitude, smaller = more precision
 const VEL_MAX: f32 = 10.0;
 
 // ------------------------------------------------------------------ //
-//  index helper                                                        //
+//  index helper                                                      //
 // ------------------------------------------------------------------ //
 
 #[inline(always)]
@@ -38,168 +40,132 @@ pub const fn idx(x: usize, y: usize) -> usize {
 }
 
 // ------------------------------------------------------------------ //
-//  fixed-point encode / decode                                         //
+//  fixed-point encode / decode                                       //
 // ------------------------------------------------------------------ //
 
-/// Encode a velocity value in [-VEL_MAX, +VEL_MAX] to u16.
+/// Encode a velocity value in [-VEL_MAX, +VEL_MAX] to u16
 #[inline(always)]
 fn enc_vel(v: f32) -> u16 {
     let norm = (v / VEL_MAX).clamp(-1.0, 1.0);
     (norm * 32767.0 + 32768.5) as u16
 }
 
-/// Decode a u16 velocity back to f32.
+/// Decode a u16 velocity back to f32
 #[inline(always)]
 fn dec_vel(raw: u16) -> f32 {
     (raw as f32 - 32768.0) / 32767.0 * VEL_MAX
 }
 
+/// Encode a dye channel value in [0, 1] to u16 (linear, full range)
+#[inline(always)]
+fn enc_dye(v: f32) -> u16 {
+    (v.clamp(0.0, 1.0) * 65535.0 + 0.5) as u16
+}
+
+/// Decode a u16 dye value back to f32
+#[inline(always)]
+fn dec_dye(raw: u16) -> f32 {
+    raw as f32 * (1.0 / 65535.0)
+}
+
+/// Pack an RGB triple into a Color565 directly from f32 [0,1] components
+#[inline(always)]
+fn rgb_to_color565(r: f32, g: f32, b: f32) -> Color565 {
+    let ri = (r * 31.0 + 0.5) as u16;
+    let gi = (g * 63.0 + 0.5) as u16;
+    let bi = (b * 31.0 + 0.5) as u16;
+    Color565::from_raw((ri << 11) | (gi << 5) | bi)
+}
+
 // ------------------------------------------------------------------ //
-//  Grid                                                                //
+//  Grid                                                              //
 // ------------------------------------------------------------------ //
 
 pub struct Grid {
+    // ---- live fields ------------------------------------------------
     /// Velocity X - fixed-point, signed, bias 0x8000
     pub u: [u16; GRID_WITH_BOUNDARY_SIZE],
     /// Velocity Y - fixed-point, signed, bias 0x8000
     pub v: [u16; GRID_WITH_BOUNDARY_SIZE],
+    /// Dye channels - linear u16 [0, 65535]
+    pub r: [u16; GRID_WITH_BOUNDARY_SIZE],
+    pub g: [u16; GRID_WITH_BOUNDARY_SIZE],
+    pub b: [u16; GRID_WITH_BOUNDARY_SIZE],
 
-    /// Dye channels - 10 bit channels with 1 bit padding
-    pub rgb: [Rgb; GRID_WITH_BOUNDARY_SIZE],
+    // ---- persistent scratch ----
+    scratch_u: [u16; GRID_WITH_BOUNDARY_SIZE],
+    scratch_v: [u16; GRID_WITH_BOUNDARY_SIZE],
+    scratch_r: [u16; GRID_WITH_BOUNDARY_SIZE],
+    scratch_g: [u16; GRID_WITH_BOUNDARY_SIZE],
+    scratch_b: [u16; GRID_WITH_BOUNDARY_SIZE],
 }
 
-// Zero velocity encodes as 0x8000 (midpoint), zero density as 0x0000.
+// Zero velocity encodes as 0x8000
 const ZERO_VEL: u16 = 0x8000;
 
 impl Grid {
     pub fn new() -> Self {
         Self {
-            u: [ZERO_VEL; GRID_WITH_BOUNDARY_SIZE],
-            v: [ZERO_VEL; GRID_WITH_BOUNDARY_SIZE],
-            rgb: [Rgb::ZERO; GRID_WITH_BOUNDARY_SIZE],
+            u:         [ZERO_VEL; GRID_WITH_BOUNDARY_SIZE],
+            v:         [ZERO_VEL; GRID_WITH_BOUNDARY_SIZE],
+            r:         [0;        GRID_WITH_BOUNDARY_SIZE],
+            g:         [0;        GRID_WITH_BOUNDARY_SIZE],
+            b:         [0;        GRID_WITH_BOUNDARY_SIZE],
+            scratch_u: [ZERO_VEL; GRID_WITH_BOUNDARY_SIZE],
+            scratch_v: [ZERO_VEL; GRID_WITH_BOUNDARY_SIZE],
+            scratch_r: [0;        GRID_WITH_BOUNDARY_SIZE],
+            scratch_g: [0;        GRID_WITH_BOUNDARY_SIZE],
+            scratch_b: [0;        GRID_WITH_BOUNDARY_SIZE],
         }
     }
 
     // ------------------------------------------------------------------ //
-    //  boundary                                                            //
+    //  boundary conditions                                               //
     // ------------------------------------------------------------------ //
 
-    fn set_bnd_vel(b: i32, field: &mut [u16; GRID_WITH_BOUNDARY_SIZE]) {
-        for y in 1..=GRID_HEIGHT as usize {
-            let inner_l = dec_vel(field[idx(1,           y)]);
-            let inner_r = dec_vel(field[idx(GRID_WIDTH as usize, y)]);
-            field[idx(0,                       y)] = enc_vel(if b == 1 { -inner_l } else { inner_l });
-            field[idx(GRID_WIDTH as usize + 1, y)] = enc_vel(if b == 1 { -inner_r } else { inner_r });
-        }
-        for x in 1..=GRID_WIDTH as usize {
-            let inner_t = dec_vel(field[idx(x, 1)]);
-            let inner_b = dec_vel(field[idx(x, GRID_HEIGHT as usize)]);
-            field[idx(x, 0                       )] = enc_vel(if b == 2 { -inner_t } else { inner_t });
-            field[idx(x, GRID_HEIGHT as usize + 1)] = enc_vel(if b == 2 { -inner_b } else { inner_b });
-        }
-        // corners
+    /// Apply velocity boundary to a f32 scratch array
+    /// b=1 -> negate at left/right walls (u component)
+    /// b=2 -> negate at top/bottom walls (v component)
+    #[inline]
+    fn bnd_vel_f32(b: i32, f: &mut [f32; GRID_WITH_BOUNDARY_SIZE]) {
         let gw = GRID_WIDTH  as usize;
         let gh = GRID_HEIGHT as usize;
-        field[idx(0,    0   )] = enc_vel(0.5 * (dec_vel(field[idx(1,  0   )]) + dec_vel(field[idx(0,  1 )])));
-        field[idx(gw+1, 0   )] = enc_vel(0.5 * (dec_vel(field[idx(gw, 0   )]) + dec_vel(field[idx(gw, 1 )])));
-        field[idx(0,    gh+1)] = enc_vel(0.5 * (dec_vel(field[idx(1,  gh+1)]) + dec_vel(field[idx(0,  gh)])));
-        field[idx(gw+1, gh+1)] = enc_vel(0.5 * (dec_vel(field[idx(gw, gh+1)]) + dec_vel(field[idx(gw, gh)])));
-    }
-
-    fn set_bnd_rgb(field: &mut [Rgb; GRID_WITH_BOUNDARY_SIZE]) {
-        let gw = GRID_WIDTH  as usize;
-        let gh = GRID_HEIGHT as usize;
-        // left and right walls - density copies neighbour (b=0)
         for y in 1..=gh {
-            field[idx(0,    y)] = field[idx(1,  y)];
-            field[idx(gw+1, y)] = field[idx(gw, y)];
+            f[idx(0,    y)] = if b == 1 { -f[idx(1,  y)] } else { f[idx(1,  y)] };
+            f[idx(gw+1, y)] = if b == 1 { -f[idx(gw, y)] } else { f[idx(gw, y)] };
         }
-        // top and bottom walls
         for x in 1..=gw {
-            field[idx(x, 0   )] = field[idx(x, 1 )];
-            field[idx(x, gh+1)] = field[idx(x, gh)];
+            f[idx(x, 0   )] = if b == 2 { -f[idx(x, 1 )] } else { f[idx(x, 1 )] };
+            f[idx(x, gh+1)] = if b == 2 { -f[idx(x, gh)] } else { f[idx(x, gh)] };
         }
-        // corners - integer average per packed channel
-        field[idx(0,    0   )] = field[idx(1,  0   )].avg(field[idx(0,  1  )]);
-        field[idx(gw+1, 0   )] = field[idx(gw, 0   )].avg(field[idx(gw, 1  )]);
-        field[idx(0,    gh+1)] = field[idx(1,  gh+1)].avg(field[idx(0,  gh )]);
-        field[idx(gw+1, gh+1)] = field[idx(gw, gh+1)].avg(field[idx(gw, gh )]);
+        f[idx(0,    0   )] = 0.5 * (f[idx(1,  0   )] + f[idx(0,  1  )]);
+        f[idx(gw+1, 0   )] = 0.5 * (f[idx(gw, 0   )] + f[idx(gw, 1  )]);
+        f[idx(0,    gh+1)] = 0.5 * (f[idx(1,  gh+1)] + f[idx(0,  gh )]);
+        f[idx(gw+1, gh+1)] = 0.5 * (f[idx(gw, gh+1)] + f[idx(gw, gh )]);
     }
 
-    // ------------------------------------------------------------------ //
-    //  diffuse                                                           //
-    // ------------------------------------------------------------------ //
-
-    fn diffuse_rgb(rgb: &mut [Rgb; GRID_WITH_BOUNDARY_SIZE], dt: f32) {
+    /// Apply copy (zero-gradient) boundary to a f32 scratch array
+    #[inline]
+    fn bnd_copy_f32(f: &mut [f32; GRID_WITH_BOUNDARY_SIZE]) {
         let gw = GRID_WIDTH  as usize;
         let gh = GRID_HEIGHT as usize;
-        let a   = dt * DYE_DIFF * (GRID_WIDTH as f32).max(GRID_HEIGHT as f32);
-        let inv = 1.0 / (1.0 + 4.0 * a);
-
-        // decode
-        let mut rf = [0.0f32; GRID_WITH_BOUNDARY_SIZE];
-        let mut gf = [0.0f32; GRID_WITH_BOUNDARY_SIZE];
-        let mut bf = [0.0f32; GRID_WITH_BOUNDARY_SIZE];
-        // keep a snapshot of the original values as the "prev" source
-        let mut rf0 = [0.0f32; GRID_WITH_BOUNDARY_SIZE];
-        let mut gf0 = [0.0f32; GRID_WITH_BOUNDARY_SIZE];
-        let mut bf0 = [0.0f32; GRID_WITH_BOUNDARY_SIZE];
-        for i in 0..GRID_WITH_BOUNDARY_SIZE {
-            let r = rgb[i].r();
-            let g = rgb[i].g();
-            let b = rgb[i].b();
-            rf[i] = r; rf0[i] = r;
-            gf[i] = g; gf0[i] = g;
-            bf[i] = b; bf0[i] = b;
+        for y in 1..=gh {
+            f[idx(0,    y)] = f[idx(1,  y)];
+            f[idx(gw+1, y)] = f[idx(gw, y)];
         }
-
-        for _ in 0..DIFF_ITER {
-            for y in 1..=gh {
-                for x in 1..=gw {
-                    let i   = idx(x, y);
-                    let i_l = idx(x-1, y); let i_r = idx(x+1, y);
-                    let i_u = idx(x, y-1); let i_d = idx(x, y+1);
-                    rf[i] = (rf0[i] + a * (rf[i_l] + rf[i_r] + rf[i_u] + rf[i_d])) * inv;
-                    gf[i] = (gf0[i] + a * (gf[i_l] + gf[i_r] + gf[i_u] + gf[i_d])) * inv;
-                    bf[i] = (bf0[i] + a * (bf[i_l] + bf[i_r] + bf[i_u] + bf[i_d])) * inv;
-                }
-            }
-            // boundary on f32 scratch directly
-            for y in 1..=gh {
-                rf[idx(0,    y)] = rf[idx(1,  y)];
-                gf[idx(0,    y)] = gf[idx(1,  y)];
-                bf[idx(0,    y)] = bf[idx(1,  y)];
-                rf[idx(gw+1, y)] = rf[idx(gw, y)];
-                gf[idx(gw+1, y)] = gf[idx(gw, y)];
-                bf[idx(gw+1, y)] = bf[idx(gw, y)];
-            }
-            for x in 1..=gw {
-                rf[idx(x, 0)]    = rf[idx(x, 1)];
-                gf[idx(x, 0)]    = gf[idx(x, 1)];
-                bf[idx(x, 0)]    = bf[idx(x, 1)];
-                rf[idx(x, gh+1)] = rf[idx(x, gh)];
-                gf[idx(x, gh+1)] = gf[idx(x, gh)];
-                bf[idx(x, gh+1)] = bf[idx(x, gh)];
-            }
-            rf[idx(0,    0)]    = 0.5 * (rf[idx(1,  0)]    + rf[idx(0,  1)]);
-            gf[idx(0,    0)]    = 0.5 * (gf[idx(1,  0)]    + gf[idx(0,  1)]);
-            bf[idx(0,    0)]    = 0.5 * (bf[idx(1,  0)]    + bf[idx(0,  1)]);
-            rf[idx(gw+1, 0)]    = 0.5 * (rf[idx(gw, 0)]    + rf[idx(gw, 1)]);
-            gf[idx(gw+1, 0)]    = 0.5 * (gf[idx(gw, 0)]    + gf[idx(gw, 1)]);
-            bf[idx(gw+1, 0)]    = 0.5 * (bf[idx(gw, 0)]    + bf[idx(gw, 1)]);
-            rf[idx(0,    gh+1)] = 0.5 * (rf[idx(1,  gh+1)] + rf[idx(0,  gh)]);
-            gf[idx(0,    gh+1)] = 0.5 * (gf[idx(1,  gh+1)] + gf[idx(0,  gh)]);
-            bf[idx(0,    gh+1)] = 0.5 * (bf[idx(1,  gh+1)] + bf[idx(0,  gh)]);
-            rf[idx(gw+1, gh+1)] = 0.5 * (rf[idx(gw, gh+1)] + rf[idx(gw, gh)]);
-            gf[idx(gw+1, gh+1)] = 0.5 * (gf[idx(gw, gh+1)] + gf[idx(gw, gh)]);
-            bf[idx(gw+1, gh+1)] = 0.5 * (bf[idx(gw, gh+1)] + bf[idx(gw, gh)]);
+        for x in 1..=gw {
+            f[idx(x, 0   )] = f[idx(x, 1 )];
+            f[idx(x, gh+1)] = f[idx(x, gh)];
         }
-
-        // encode
-        for i in 0..GRID_WITH_BOUNDARY_SIZE {
-            rgb[i] = Rgb::new(rf[i], gf[i], bf[i]);
-        }
+        f[idx(0,    0   )] = 0.5 * (f[idx(1,  0   )] + f[idx(0,  1  )]);
+        f[idx(gw+1, 0   )] = 0.5 * (f[idx(gw, 0   )] + f[idx(gw, 1  )]);
+        f[idx(0,    gh+1)] = 0.5 * (f[idx(1,  gh+1)] + f[idx(0,  gh )]);
+        f[idx(gw+1, gh+1)] = 0.5 * (f[idx(gw, gh+1)] + f[idx(gw, gh )]);
     }
+
+    // ------------------------------------------------------------------ //
+    //  diffuse (velocity only)                                           //
+    // ------------------------------------------------------------------ //
 
     fn diffuse_vel(
         b: i32,
@@ -211,115 +177,63 @@ impl Grid {
         let a   = dt * VEL_VISC * (GRID_WIDTH as f32).max(GRID_HEIGHT as f32);
         let inv = 1.0 / (1.0 + 4.0 * a);
 
-        // decode + snapshot
+        // Decode once into stack-local f32 scratch.
         let mut f  = [0.0f32; GRID_WITH_BOUNDARY_SIZE];
         let mut f0 = [0.0f32; GRID_WITH_BOUNDARY_SIZE];
         for i in 0..GRID_WITH_BOUNDARY_SIZE {
             let v = dec_vel(field[i]);
-            f[i] = v; f0[i] = v;
+            f[i] = v;
+            f0[i] = v;
         }
 
         for _ in 0..DIFF_ITER {
             for y in 1..=gh {
                 for x in 1..=gw {
                     let i = idx(x, y);
-                    f[i] = (f0[i] + a * (f[idx(x-1,y)] + f[idx(x+1,y)]
-                                       + f[idx(x,y-1)] + f[idx(x,y+1)])) * inv;
+                    f[i] = (f0[i] + a * (f[idx(x-1, y)] + f[idx(x+1, y)]
+                                       + f[idx(x, y-1)] + f[idx(x, y+1)])) * inv;
                 }
             }
-            // inline boundary on f32 scratch
-            for y in 1..=gh {
-                f[idx(0,    y)] = if b == 1 { -f[idx(1,  y)] } else { f[idx(1,  y)] };
-                f[idx(gw+1, y)] = if b == 1 { -f[idx(gw, y)] } else { f[idx(gw, y)] };
-            }
-            for x in 1..=gw {
-                f[idx(x, 0   )] = if b == 2 { -f[idx(x, 1 )] } else { f[idx(x, 1 )] };
-                f[idx(x, gh+1)] = if b == 2 { -f[idx(x, gh)] } else { f[idx(x, gh)] };
-            }
-            f[idx(0,    0   )] = 0.5*(f[idx(1,  0   )]+f[idx(0,  1  )]);
-            f[idx(gw+1, 0   )] = 0.5*(f[idx(gw, 0   )]+f[idx(gw, 1  )]);
-            f[idx(0,    gh+1)] = 0.5*(f[idx(1,  gh+1)]+f[idx(0,  gh )]);
-            f[idx(gw+1, gh+1)] = 0.5*(f[idx(gw, gh+1)]+f[idx(gw, gh )]);
+            Self::bnd_vel_f32(b, &mut f);
         }
 
-        // encode
-        for i in 0..GRID_WITH_BOUNDARY_SIZE { field[i] = enc_vel(f[i]); }
-    }
-
-    // ------------------------------------------------------------------ //
-    //  advect                                                              //
-    // ------------------------------------------------------------------ //
-
-    fn advect_vel(
-        b: i32,
-        field: &mut [u16; GRID_WITH_BOUNDARY_SIZE],
-        u: &[u16; GRID_WITH_BOUNDARY_SIZE],
-        v: &[u16; GRID_WITH_BOUNDARY_SIZE],
-        dt: f32,
-    ) {
-        let dt0_x = dt * GRID_WIDTH  as f32;
-        let dt0_y = dt * GRID_HEIGHT as f32;
-        let gw = GRID_WIDTH  as usize;
-        let gh = GRID_HEIGHT as usize;
-
-        let mut src = [0.0f32; GRID_WITH_BOUNDARY_SIZE];
-        let mut uf  = [0.0f32; GRID_WITH_BOUNDARY_SIZE];
-        let mut vf  = [0.0f32; GRID_WITH_BOUNDARY_SIZE];
         for i in 0..GRID_WITH_BOUNDARY_SIZE {
-            src[i] = dec_vel(field[i]);
-            uf[i]  = dec_vel(u[i]);
-            vf[i]  = dec_vel(v[i]);
+            field[i] = enc_vel(f[i]);
         }
-
-        for y in 1..=gh {
-            for x in 1..=gw {
-                let i = idx(x, y);
-                let mut px = x as f32 - dt0_x * uf[i];
-                let mut py = y as f32 - dt0_y * vf[i];
-                px = px.clamp(0.5, gw as f32 + 0.5);
-                py = py.clamp(0.5, gh as f32 + 0.5);
-                let x0 = px as usize; let x1 = x0 + 1;
-                let y0 = py as usize; let y1 = y0 + 1;
-                let s1 = px - x0 as f32; let s0 = 1.0 - s1;
-                let t1 = py - y0 as f32; let t0 = 1.0 - t1;
-                field[idx(x, y)] = enc_vel(
-                    s0 * (t0 * src[idx(x0, y0)] + t1 * src[idx(x0, y1)])
-                  + s1 * (t0 * src[idx(x1, y0)] + t1 * src[idx(x1, y1)])
-                );
-            }
-        }
-        Self::set_bnd_vel(b, field);
     }
 
-    fn advect_rgb(
-        rgb: &mut [Rgb; GRID_WITH_BOUNDARY_SIZE],
-        u:   &[u16; GRID_WITH_BOUNDARY_SIZE],
-        v:   &[u16; GRID_WITH_BOUNDARY_SIZE],
-        dt:  f32,
-    ) {
-        let dt0_x = dt * GRID_WIDTH  as f32;
-        let dt0_y = dt * GRID_HEIGHT as f32;
+    // ------------------------------------------------------------------ //
+    //  advection pass - velocity + all three dye channels                //
+    // ------------------------------------------------------------------ //
+
+    fn advect_all(&mut self, dt: f32) {
         let gw = GRID_WIDTH  as usize;
         let gh = GRID_HEIGHT as usize;
+        let dt0_x = dt * GRID_WIDTH  as f32;
+        let dt0_y = dt * GRID_HEIGHT as f32;
 
-        // decode everything once before the hot loop
+        // Snapshot current velocity into scratch buffers (used as source).
+        // We re-use scratch_u/scratch_v to avoid any extra allocation.
+        self.scratch_u.copy_from_slice(&self.u);
+        self.scratch_v.copy_from_slice(&self.v);
+        self.scratch_r.copy_from_slice(&self.r);
+        self.scratch_g.copy_from_slice(&self.g);
+        self.scratch_b.copy_from_slice(&self.b);
+
+        // Decode velocity source arrays once - hot loop reads from these.
+        // Two small stack arrays (~10 KB each) that fit in L1.
         let mut uf = [0.0f32; GRID_WITH_BOUNDARY_SIZE];
         let mut vf = [0.0f32; GRID_WITH_BOUNDARY_SIZE];
-        let mut rf = [0.0f32; GRID_WITH_BOUNDARY_SIZE];
-        let mut gf = [0.0f32; GRID_WITH_BOUNDARY_SIZE];
-        let mut bf = [0.0f32; GRID_WITH_BOUNDARY_SIZE];
         for i in 0..GRID_WITH_BOUNDARY_SIZE {
-            uf[i] = dec_vel(u[i]);
-            vf[i] = dec_vel(v[i]);
-            rf[i] = rgb[i].r();
-            gf[i] = rgb[i].g();
-            bf[i] = rgb[i].b();
+            uf[i] = dec_vel(self.scratch_u[i]);
+            vf[i] = dec_vel(self.scratch_v[i]);
         }
 
         for y in 1..=gh {
             for x in 1..=gw {
                 let i = idx(x, y);
 
+                // ---- backtrack particle position ----
                 let mut px = x as f32 - dt0_x * uf[i];
                 let mut py = y as f32 - dt0_y * vf[i];
                 px = px.clamp(0.5, gw as f32 + 0.5);
@@ -330,22 +244,102 @@ impl Grid {
                 let s1 = px - x0 as f32; let s0 = 1.0 - s1;
                 let t1 = py - y0 as f32; let t0 = 1.0 - t1;
 
-                // compute bilinear weights once, apply to all 3 channels
+                // ---- bilinear weights - computed once for all 5 channels ----
                 let w00 = s0 * t0; let w01 = s0 * t1;
                 let w10 = s1 * t0; let w11 = s1 * t1;
 
                 let i00 = idx(x0, y0); let i01 = idx(x0, y1);
                 let i10 = idx(x1, y0); let i11 = idx(x1, y1);
 
-                let r = (w00*rf[i00] + w01*rf[i01] + w10*rf[i10] + w11*rf[i11]) * DYE_DECAY;
-                let g = (w00*gf[i00] + w01*gf[i01] + w10*gf[i10] + w11*gf[i11]) * DYE_DECAY;
-                let b = (w00*bf[i00] + w01*bf[i01] + w10*bf[i10] + w11*bf[i11]) * DYE_DECAY;
+                // ---- velocity channels (source = scratch_u/v, decoded in uf/vf) ----
+                self.u[i] = enc_vel(
+                    w00*uf[i00] + w01*uf[i01] + w10*uf[i10] + w11*uf[i11]
+                );
+                self.v[i] = enc_vel(
+                    w00*vf[i00] + w01*vf[i01] + w10*vf[i10] + w11*vf[i11]
+                );
 
-                rgb[i] = Rgb::new(r, g, b);
+                // ---- dye channels (source = scratch_r/g/b, decoded inline) ----
+                let r = dec_dye(self.scratch_r[i00]) * w00
+                      + dec_dye(self.scratch_r[i01]) * w01
+                      + dec_dye(self.scratch_r[i10]) * w10
+                      + dec_dye(self.scratch_r[i11]) * w11;
+                let g = dec_dye(self.scratch_g[i00]) * w00
+                      + dec_dye(self.scratch_g[i01]) * w01
+                      + dec_dye(self.scratch_g[i10]) * w10
+                      + dec_dye(self.scratch_g[i11]) * w11;
+                let b = dec_dye(self.scratch_b[i00]) * w00
+                      + dec_dye(self.scratch_b[i01]) * w01
+                      + dec_dye(self.scratch_b[i10]) * w10
+                      + dec_dye(self.scratch_b[i11]) * w11;
+
+                self.r[i] = enc_dye(r * DYE_DECAY);
+                self.g[i] = enc_dye(g * DYE_DECAY);
+                self.b[i] = enc_dye(b * DYE_DECAY);
             }
         }
 
-        Self::set_bnd_rgb(rgb);
+        // Boundaries for velocity
+        Self::bnd_vel_u16(1, &mut self.u);
+        Self::bnd_vel_u16(2, &mut self.v);
+
+        // Boundaries for dye (copy / zero-gradient)
+        Self::bnd_copy_u16(&mut self.r);
+        Self::bnd_copy_u16(&mut self.g);
+        Self::bnd_copy_u16(&mut self.b);
+    }
+
+    /// Apply velocity boundary directly to a u16 field (avoids decode/encode for bnd only).
+    fn bnd_vel_u16(b: i32, field: &mut [u16; GRID_WITH_BOUNDARY_SIZE]) {
+        let gw = GRID_WIDTH  as usize;
+        let gh = GRID_HEIGHT as usize;
+        for y in 1..=gh {
+            let inner_l = dec_vel(field[idx(1,  y)]);
+            let inner_r = dec_vel(field[idx(gw, y)]);
+            field[idx(0,    y)] = enc_vel(if b == 1 { -inner_l } else { inner_l });
+            field[idx(gw+1, y)] = enc_vel(if b == 1 { -inner_r } else { inner_r });
+        }
+        for x in 1..=gw {
+            let inner_t = dec_vel(field[idx(x, 1 )]);
+            let inner_b = dec_vel(field[idx(x, gh)]);
+            field[idx(x, 0   )] = enc_vel(if b == 2 { -inner_t } else { inner_t });
+            field[idx(x, gh+1)] = enc_vel(if b == 2 { -inner_b } else { inner_b });
+        }
+        field[idx(0,    0   )] = enc_vel(0.5 * (dec_vel(field[idx(1,  0   )]) + dec_vel(field[idx(0,  1  )])));
+        field[idx(gw+1, 0   )] = enc_vel(0.5 * (dec_vel(field[idx(gw, 0   )]) + dec_vel(field[idx(gw, 1  )])));
+        field[idx(0,    gh+1)] = enc_vel(0.5 * (dec_vel(field[idx(1,  gh+1)]) + dec_vel(field[idx(0,  gh )])));
+        field[idx(gw+1, gh+1)] = enc_vel(0.5 * (dec_vel(field[idx(gw, gh+1)]) + dec_vel(field[idx(gw, gh )])));
+    }
+
+    /// Apply copy boundary directly to a u16 dye field.
+    fn bnd_copy_u16(field: &mut [u16; GRID_WITH_BOUNDARY_SIZE]) {
+        let gw = GRID_WIDTH  as usize;
+        let gh = GRID_HEIGHT as usize;
+        for y in 1..=gh {
+            field[idx(0,    y)] = field[idx(1,  y)];
+            field[idx(gw+1, y)] = field[idx(gw, y)];
+        }
+        for x in 1..=gw {
+            field[idx(x, 0   )] = field[idx(x, 1 )];
+            field[idx(x, gh+1)] = field[idx(x, gh)];
+        }
+        // corner average
+        field[idx(0, 0)] = ((
+            field[idx(1, 0)] as u32
+            + field[idx(0, 1)] as u32
+        ) / 2) as u16;
+        field[idx(gw+1, 0)] = ((
+            field[idx(gw, 0)] as u32
+            + field[idx(gw, 1)] as u32
+        ) / 2) as u16;
+        field[idx(0, gh+1)] = ((
+            field[idx(1, gh+1)] as u32
+            + field[idx(0, gh )] as u32
+        ) / 2) as u16;
+        field[idx(gw+1, gh+1)] = ((
+            field[idx(gw, gh+1)] as u32
+            + field[idx(gw, gh)] as u32
+        ) / 2) as u16;
     }
 
     // ------------------------------------------------------------------ //
@@ -358,6 +352,16 @@ impl Grid {
         let h_x = 1.0 / GRID_WIDTH  as f32;
         let h_y = 1.0 / GRID_HEIGHT as f32;
 
+        // Decode velocity once into two stack-local arrays.
+        // Reuse scratch_r/g/b storage is tempting but project() overlaps
+        // with nothing else, so two plain stack arrays are fine and clear.
+        let mut uf = [0.0f32; GRID_WITH_BOUNDARY_SIZE];
+        let mut vf = [0.0f32; GRID_WITH_BOUNDARY_SIZE];
+        for i in 0..GRID_WITH_BOUNDARY_SIZE {
+            uf[i] = dec_vel(self.u[i]);
+            vf[i] = dec_vel(self.v[i]);
+        }
+
         let mut div = [0.0f32; GRID_WITH_BOUNDARY_SIZE];
         let mut p   = [0.0f32; GRID_WITH_BOUNDARY_SIZE];
 
@@ -365,70 +369,27 @@ impl Grid {
         for y in 1..=gh {
             for x in 1..=gw {
                 div[idx(x, y)] = -0.5 * (
-                    h_x * (dec_vel(self.u[idx(x+1, y)]) - dec_vel(self.u[idx(x-1, y)]))
-                    + h_y * (dec_vel(self.v[idx(x, y+1)]) - dec_vel(self.v[idx(x, y-1)]))
+                    h_x * (uf[idx(x+1, y)] - uf[idx(x-1, y)])
+                  + h_y * (vf[idx(x, y+1)] - vf[idx(x, y-1)])
                 );
             }
         }
+        Self::bnd_copy_f32(&mut div);
 
-        // boundary for divergence
-        for y in 1..=gh {
-            div[idx(0,    y)] = div[idx(1,  y)];
-            div[idx(gw+1, y)] = div[idx(gw, y)];
-        }
-        for x in 1..=gw {
-            div[idx(x, 0   )] = div[idx(x, 1 )];
-            div[idx(x, gh+1)] = div[idx(x, gh)];
-        }
-        div[idx(0,    0   )] = 0.5 * (div[idx(1,  0   )] + div[idx(0,  1  )]);
-        div[idx(gw+1, 0   )] = 0.5 * (div[idx(gw, 0   )] + div[idx(gw, 1  )]);
-        div[idx(0,    gh+1)] = 0.5 * (div[idx(1,  gh+1)] + div[idx(0,  gh )]);
-        div[idx(gw+1, gh+1)] = 0.5 * (div[idx(gw, gh+1)] + div[idx(gw, gh )]);
-
-        // -- pressure solve (Gauss-Seidel) --
+        // -- pressure solve (Gauss-Seidel, 5 iterations) --
         for _ in 0..SIM_STEPS {
             for y in 1..=gh {
                 for x in 1..=gw {
                     p[idx(x, y)] = (div[idx(x, y)]
                         + p[idx(x-1, y)] + p[idx(x+1, y)]
                         + p[idx(x, y-1)] + p[idx(x, y+1)]
-                    ) / 4.0;
+                    ) * 0.25;
                 }
             }
-
-            // pressure boundary (b=0)
-            for y in 1..=gh {
-                p[idx(0,    y)] = p[idx(1,  y)];
-                p[idx(gw+1, y)] = p[idx(gw, y)];
-            }
-            for x in 1..=gw {
-                p[idx(x, 0   )] = p[idx(x, 1 )];
-                p[idx(x, gh+1)] = p[idx(x, gh)];
-            }
-
-            p[idx(0,    0   )] = 0.5 * (p[idx(1,  0   )] + p[idx(0,  1  )]);
-            p[idx(gw+1, 0   )] = 0.5 * (p[idx(gw, 0   )] + p[idx(gw, 1  )]);
-            p[idx(0,    gh+1)] = 0.5 * (p[idx(1,  gh+1)] + p[idx(0,  gh )]);
-            p[idx(gw+1, gh+1)] = 0.5 * (p[idx(gw, gh+1)] + p[idx(gw, gh )]);
+            Self::bnd_copy_f32(&mut p);
         }
 
-        // -- subtract pressure gradient --
-        // for y in 1..=gh {
-        //     for x in 1..=gw {
-        //         let u_new = dec_vel(self.u[idx(x, y)])
-        //             - 0.5 * (p[idx(x+1, y)] - p[idx(x-1, y)]) / h_x;
-        //         let v_new = dec_vel(self.v[idx(x, y)])
-        //             - 0.5 * (p[idx(x, y+1)] - p[idx(x, y-1)]) / h_y;
-        //         self.u[idx(x, y)] = enc_vel(u_new);
-        //         self.v[idx(x, y)] = enc_vel(v_new);
-        //     }
-        // }
-        let mut uf = [0.0f32; GRID_WITH_BOUNDARY_SIZE];
-        let mut vf = [0.0f32; GRID_WITH_BOUNDARY_SIZE];
-        for i in 0..GRID_WITH_BOUNDARY_SIZE {
-            uf[i] = dec_vel(self.u[i]);
-            vf[i] = dec_vel(self.v[i]);
-        }
+        // -- subtract pressure gradient (work on decoded uf/vf, encode once) --
         for y in 1..=gh {
             for x in 1..=gw {
                 let i = idx(x, y);
@@ -437,42 +398,28 @@ impl Grid {
             }
         }
 
-        Self::set_bnd_vel(1, &mut self.u);
-        Self::set_bnd_vel(2, &mut self.v);
+        Self::bnd_vel_u16(1, &mut self.u);
+        Self::bnd_vel_u16(2, &mut self.v);
     }
 
     // ------------------------------------------------------------------ //
-    //  steps                                                        //
+    //  public simulation steps                                             //
     // ------------------------------------------------------------------ //
 
-    pub fn vel_step(&mut self, dt: f32) {
-        // Skip vel diffuse entirely if viscosity is zero - saves the stack alloc
+    /// Single simulation tick.
+    /// Order: vel diffuse -> project -> unified advect (vel + dye) -> project
+    pub fn step(&mut self, dt: f32) {
         if VEL_VISC > 0.0 {
             Self::diffuse_vel(1, &mut self.u, dt);
             Self::diffuse_vel(2, &mut self.v, dt);
             self.project();
         }
-        let u_snap = self.u;
-        let v_snap = self.v;
-        Self::advect_vel(1, &mut self.u, &u_snap, &v_snap, dt);
-        Self::advect_vel(2, &mut self.v, &u_snap, &v_snap, dt);
+        self.advect_all(dt);
         self.project();
     }
 
-    pub fn dens_step(&mut self, dt: f32) {
-        Self::diffuse_rgb(&mut self.rgb, dt);
-        let u_snap = self.u;
-        let v_snap = self.v;
-        Self::advect_rgb(&mut self.rgb, &u_snap, &v_snap, dt);
-    }
-
-    pub fn step(&mut self, dt: f32) {
-        self.vel_step(dt);
-        self.dens_step(dt);
-    }
-
     // ------------------------------------------------------------------ //
-    //  force injection                                                     //
+    //  force injection                                                   //
     // ------------------------------------------------------------------ //
 
     pub fn apply_circular_force(
@@ -503,18 +450,15 @@ impl Grid {
                     } else {
                         (CIRCLE_OUTER_SQ - dist_sq) / (CIRCLE_OUTER_SQ - r_inner_sq)
                     };
-
-                    let u_new = dec_vel(self.u[i]) + fx * falloff * dt;
-                    let v_new = dec_vel(self.v[i]) + fy * falloff * dt;
-                    self.u[i] = enc_vel(u_new);
-                    self.v[i] = enc_vel(v_new);
+                    self.u[i] = enc_vel(dec_vel(self.u[i]) + fx * falloff * dt);
+                    self.v[i] = enc_vel(dec_vel(self.v[i]) + fy * falloff * dt);
                 }
             }
         }
     }
 
     // ------------------------------------------------------------------ //
-    //  rendering helpers                                                   //
+    //  dye injection                                                       //
     // ------------------------------------------------------------------ //
 
     pub fn spawn_dye(&mut self, r: f32, g: f32, b: f32) {
@@ -524,36 +468,55 @@ impl Grid {
                 let dy = y as f32 - CIRCLE_CY;
                 let dist_sq = dx * dx + dy * dy;
 
-                if dist_sq <= CIRCLE_OUTER_SQ {
-                    let i = idx(x as usize, y as usize);
+                if dist_sq > CIRCLE_OUTER_SQ { continue; }
 
-                    let falloff = if dist_sq <= CIRCLE_INNER_SQ {
-                        1.0
-                    } else {
-                        (CIRCLE_OUTER_SQ - dist_sq) / (CIRCLE_OUTER_SQ - CIRCLE_INNER_SQ)
-                    };
+                let i = idx(x as usize, y as usize);
+                let falloff = if dist_sq <= CIRCLE_INNER_SQ {
+                    1.0
+                } else {
+                    (CIRCLE_OUTER_SQ - dist_sq) / (CIRCLE_OUTER_SQ - CIRCLE_INNER_SQ)
+                };
+                let base = falloff * CIRCLE_MAX_DENS;
 
-                    let base = falloff * CIRCLE_MAX_DENS; // [0, 1]
-
-                    // Decode current packed value
-                    let cur = self.rgb[i];
-                    let cr = cur.r();
-                    let cg = cur.g();
-                    let cb = cur.b();
-
-                    // Saturating add per channel
-                    let nr = (cr + base * r).clamp(0.0, 1.0);
-                    let ng = (cg + base * g).clamp(0.0, 1.0);
-                    let nb = (cb + base * b).clamp(0.0, 1.0);
-
-                    self.rgb[i] = Rgb::new(nr, ng, nb);
-                }
+                self.r[i] = enc_dye((dec_dye(self.r[i]) + base * r).clamp(0.0, 1.0));
+                self.g[i] = enc_dye((dec_dye(self.g[i]) + base * g).clamp(0.0, 1.0));
+                self.b[i] = enc_dye((dec_dye(self.b[i]) + base * b).clamp(0.0, 1.0));
             }
         }
     }
 
+    // ------------------------------------------------------------------ //
+    //  rendering                                                           //
+    // ------------------------------------------------------------------ //
+
     #[inline(always)]
-    pub fn get_color(&self, idx: usize) -> Color565 {
-        self.rgb[idx].to_color565()
+    pub fn get_color(&self, i: usize) -> Color565 {
+        rgb_to_color565(dec_dye(self.r[i]), dec_dye(self.g[i]), dec_dye(self.b[i]))
+    }
+
+    // ------------------------------------------------------------------ //
+    //  benchmarking                                                        //
+    // ------------------------------------------------------------------ //
+
+    pub fn step_benchmarked(&mut self, dt: f32) -> (u64, u64, u64) {
+        // 1. Velocity diffusion
+        let t0 = get_current_time_millis();
+        if VEL_VISC > 0.0 {
+            Self::diffuse_vel(1, &mut self.u, dt);
+            Self::diffuse_vel(2, &mut self.v, dt);
+            self.project();
+        }
+        let t1 = get_current_time_millis();
+
+        // 2. Advection
+        self.advect_all(dt);
+        let t2 = get_current_time_millis();
+
+        // 3. Final projection
+        self.project();
+        let t3 = get_current_time_millis();
+
+        // (DiffTime, AdvectTime, ProjectTime, DensTime=0)
+        (t1 - t0, t2 - t1, t3 - t2)
     }
 }

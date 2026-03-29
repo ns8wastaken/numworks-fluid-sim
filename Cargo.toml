@@ -20,7 +20,7 @@ crate-type = ["cdylib"]
 name = "fluid_sim"
 
 [features]
-default = ["upsilon"]
+default = ["epsilon"]
 upsilon = []
 epsilon = []
 

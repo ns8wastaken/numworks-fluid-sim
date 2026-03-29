@@ -34,6 +34,11 @@ impl Color565 {
         }
     }
 
+    #[inline]
+    pub const fn from_raw(value: u16) -> Color565 {
+        Color565 { value }
+    }
+
     /// Convert a RGB 888 (standard rgb) to RGB 565.
     #[inline]
     pub const fn from_rgb888(r: u16, g: u16, b: u16) -> Color565 {

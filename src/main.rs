@@ -12,7 +12,7 @@ use nadk::utils::wait_ok_released;
 use grid::Grid;
 
 use crate::nadk::keyboard::InputManager;
-use crate::nadk::time::get_current_time_seconds;
+use crate::nadk::time::{get_current_time_millis, get_current_time_seconds};
 
 const SCALE_X: i32 = 320 / grid::GRID_WIDTH;
 const SCALE_Y: i32 = 240 / grid::GRID_HEIGHT;
@@ -120,7 +120,14 @@ fn main() {
             );
         }
 
+        // let phys_start = get_current_time_millis();
+
         grid.step(dt);
+        // let (d_t, a_t, p_t) = grid.step_benchmarked(dt);
+
+        // let phys_end = get_current_time_millis();
+
+        // let rend_start = get_current_time_millis();
 
         // Render density into cell_buffer
         for gy in 0..grid::GRID_HEIGHT {
@@ -137,5 +144,44 @@ fn main() {
                 push_rect_uniform(rect, color);
             }
         }
+
+        // let rend_end = get_current_time_millis();
+        //
+        // let phys_width = (phys_end - phys_start) as u16;
+        // let rend_width = (rend_end - rend_start) as u16;
+        //
+        // // Physics Bar (Green)
+        // push_rect_uniform(
+        //     ScreenRect { x: 0, y: 0, width: phys_width.min(320), height: 2 },
+        //     Color565::from_rgb888(0, 255, 0)
+        // );
+        //
+        // // Render Bar (Red)
+        // push_rect_uniform(
+        //     ScreenRect { x: 0, y: 2, width: rend_width.min(320), height: 2 },
+        //     Color565::from_rgb888(255, 0, 0)
+        // );
+        //
+        // // Draw a multi-colored bar at the top of the screen
+        // // Scale: 1ms = 2 pixels
+        // let x_diff  = (d_t * 2) as u16;
+        // let x_adv   = (a_t * 2) as u16;
+        // let x_proj  = (p_t * 2) as u16;
+        //
+        // // Blue: Diffusion
+        // push_rect_uniform(
+        //     ScreenRect { x: 0, y: 4, width: x_diff, height: 2 },
+        //     Color565::from_rgb888(0,0,255)
+        // );
+        // // Green: Advection
+        // push_rect_uniform(
+        //     ScreenRect { x: x_diff, y: 4, width: x_adv, height: 2 },
+        //     Color565::from_rgb888(0,255,0)
+        // );
+        // // Red: Projection
+        // push_rect_uniform(
+        //     ScreenRect { x: x_diff + x_adv, y: 4, width: x_proj, height: 2 },
+        //     Color565::from_rgb888(255,0,0)
+        // );
     }
 }
